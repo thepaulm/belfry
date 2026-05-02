@@ -26,11 +26,9 @@ fi
 
 cd "$(dirname "$0")"
 
-# --- packages -----------------------------------------------------------
-
-dnf install -y tar gzip curl
-
 # --- caddy --------------------------------------------------------------
+# tar / gzip / curl-minimal are already on AL2023; don't try to install
+# full curl, it conflicts with curl-minimal.
 
 CADDY_VERSION="2.8.4"
 if [[ ! -x /usr/local/bin/caddy ]]; then
