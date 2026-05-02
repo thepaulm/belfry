@@ -25,9 +25,6 @@ function makeTile(cam) {
   const tile = tileTemplate.content.firstElementChild.cloneNode(true);
   tile.dataset.name = cam.name;
   tile.querySelector(".label").textContent = cam.label;
-  const host = tile.querySelector(".host");
-  host.textContent = cam.host || "";
-  host.href = cam.web_url || "#";
   const setId = currentSetId();
   const playbackUrl = `/sets/${encodeURIComponent(setId)}/${encodeURIComponent(cam.name)}/playback`;
   const playback = tile.querySelector(".playback-link");
