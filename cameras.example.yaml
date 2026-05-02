@@ -1,0 +1,21 @@
+# Copy to cameras.yaml and fill in real RTSP URLs (with credentials).
+# cameras.yaml is gitignored. Keep its mode 0600.
+#
+# Cameras are organised into named "sets". Each camera `name` is the
+# MediaMTX path key and must be unique across ALL sets.
+# The HLS URL for a camera is ${hls_base}/${name}/index.m3u8.
+
+hls_base: http://localhost:8888
+
+sets:
+  - id: set1
+    label: Set 1
+    cameras:
+      - name: cam6
+        label: Backyard
+        enabled: true
+        rtsp: rtsp://admin:CHANGEME@192.168.1.10:8554/Streaming/Channels/101
+
+  - id: set2
+    label: Set 2
+    cameras: []

@@ -1,0 +1,43 @@
+# Copy to mediamtx/mediamtx.yml and edit. The real file is gitignored
+# because each `source:` line contains the camera credentials.
+#
+# Keep this file in sync with cameras.yaml: every `enabled: true` camera
+# must have a matching `paths:` entry whose key equals the camera name.
+
+logLevel: info
+logDestinations: [stdout]
+
+# Disable everything we don't use in v1.
+rtsp: yes
+rtmp: no
+webrtc: no
+srt: no
+api: no
+metrics: no
+playback: no
+
+# We pull RTSP from cameras and serve HLS to browsers.
+# `rtsp` block above stays on so MediaMTX can be a *client* of the cameras
+# (the rtspAddress server only needs to bind locally; cameras don't push to us).
+rtspAddress: 127.0.0.1:8554
+
+hls: yes
+hlsAddress: :8888
+hlsAllowOrigins: ['*']
+hlsVariant: fmp4
+hlsSegmentCount: 5
+hlsSegmentDuration: 1s
+
+paths:
+  cam6:
+    source: rtsp://admin:CHANGEME@192.168.1.10:8554/Streaming/Channels/101
+    rtspTransport: tcp
+    sourceOnDemand: yes
+    sourceOnDemandStartTimeout: 10s
+    sourceOnDemandCloseAfter: 30s
+
+  # Add more cameras here as they come online. Example:
+  # cam5:
+  #   source: rtsp://admin:PASS@192.168.1.11:554/Streaming/Channels/101
+  #   rtspTransport: tcp
+  #   sourceOnDemand: yes

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>homecam</title>
+  <link rel="stylesheet" href="/static/viewer.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+  <script defer src="/static/viewer.js"></script>
+</head>
+<body>
+  <header>
+    <h1>homecam</h1>
+    <nav id="set-nav"></nav>
+    <span id="status" class="status-pill"></span>
+  </header>
+  <main id="grid"></main>
+  <template id="tile-template">
+    <div class="tile" data-name="">
+      <div class="video-wrap">
+        <video muted autoplay playsinline></video>
+        <div class="overlay">
+          <span class="label"></span>
+          <span class="state"></span>
+          <button class="reload" type="button">Reload</button>
+        </div>
+      </div>
+      <div class="footer">
+        <span class="footer-label">Admin:</span>
+        <a class="host" target="_blank" rel="noopener"></a>
+      </div>
+    </div>
+  </template>
+</body>
+</html>
