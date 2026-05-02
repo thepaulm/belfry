@@ -28,12 +28,18 @@ function makeTile(cam) {
   const host = tile.querySelector(".host");
   host.textContent = cam.host || "";
   host.href = cam.web_url || "#";
+  const setId = currentSetId();
+  const playbackUrl = `/sets/${encodeURIComponent(setId)}/${encodeURIComponent(cam.name)}/playback`;
   const playback = tile.querySelector(".playback-link");
-  if (playback) {
-    const setId = currentSetId();
-    playback.href = `/sets/${encodeURIComponent(setId)}/${encodeURIComponent(cam.name)}/playback`;
-  }
+  if (playback) playback.href = playbackUrl;
   tile.querySelector(".reload").addEventListener("click", () => attach(cam));
+  // Tap-anywhere on the live video → playback page. The Reload button has
+  // pointer-events:auto and lives in the overlay, so its clicks don't reach
+  // the video element below; everything else in the overlay is
+  // pointer-events:none and falls through to here.
+  tile.querySelector("video").addEventListener("click", () => {
+    window.location.href = playbackUrl;
+  });
   grid.appendChild(tile);
   return tile;
 }
