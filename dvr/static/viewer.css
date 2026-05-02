@@ -204,3 +204,32 @@ main#grid {
   color: #2a2f37;
   font-weight: 600;
 }
+
+@media (max-width: 768px), (max-height: 500px) {
+  html, body {
+    height: auto;
+    min-height: 100dvh;
+    overflow: auto;
+  }
+
+  main#grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+    grid-auto-rows: auto;
+    flex: none;
+  }
+
+  .tile {
+    flex: none;
+  }
+
+  .tile .video-wrap {
+    flex: none;
+    aspect-ratio: 16 / 9;
+    width: 100%;
+  }
+
+  .tile .reload {
+    opacity: 1;
+  }
+}
