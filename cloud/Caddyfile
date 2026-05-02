@@ -15,9 +15,15 @@ yellowchicken.io {
 			uri /oauth2/auth
 			copy_headers X-Auth-Request-Email X-Auth-Request-User
 
+			# Note the explicit `*` matcher: redir's grammar is
+			# `redir [<matcher>] <to> [<code>]` and it treats a leading-/
+			# argument as an implicit path matcher. Without `*`, Caddy
+			# parses /oauth2/start?... as the matcher and `302` as the
+			# target, producing a redirect that never fires — which
+			# silently disables the auth gate.
 			@bad-status status 401
 			handle_response @bad-status {
-				redir /oauth2/start?rd={uri} 302
+				redir * /oauth2/start?rd={uri} 302
 			}
 		}
 		reverse_proxy 127.0.0.1:8080 {
