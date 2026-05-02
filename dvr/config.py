@@ -36,9 +36,23 @@ class CameraSet:
 
 
 @dataclass(frozen=True)
+class Recording:
+    path: Path
+
+
+@dataclass(frozen=True)
+class Retention:
+    evict_high_pct: int
+    evict_low_pct: int
+    scan_interval_s: int
+
+
+@dataclass(frozen=True)
 class Config:
     hls_base: str
     sets: tuple[CameraSet, ...]
+    recording: Recording
+    retention: Retention
 
     def get_set(self, id: str) -> CameraSet | None:
         return next((s for s in self.sets if s.id == id), None)
@@ -48,8 +62,27 @@ class Config:
         return tuple(c for s in self.sets for c in s.cameras)
 
 
+def _load_recording(raw: dict, project_root: Path) -> Recording:
+    block = raw.get("recording") or {}
+    path = Path(block.get("path", "./recordings"))
+    if not path.is_absolute():
+        path = (project_root / path).resolve()
+    return Recording(path=path)
+
+
+def _load_retention(raw: dict) -> Retention:
+    block = raw.get("retention") or {}
+    return Retention(
+        evict_high_pct=int(block.get("evict_high_pct", 85)),
+        evict_low_pct=int(block.get("evict_low_pct", 80)),
+        scan_interval_s=int(block.get("scan_interval_s", 60)),
+    )
+
+
 def load_config(path: Path | str = "cameras.yaml") -> Config:
-    raw = yaml.safe_load(Path(path).read_text())
+    cfg_path = Path(path)
+    raw = yaml.safe_load(cfg_path.read_text())
+    project_root = cfg_path.resolve().parent
 
     sets = tuple(
         CameraSet(
@@ -78,4 +111,16 @@ def load_config(path: Path | str = "cameras.yaml") -> Config:
                 )
             seen[c.name] = s.id
 
-    return Config(hls_base=raw["hls_base"], sets=sets)
+    retention = _load_retention(raw)
+    if not (0 < retention.evict_low_pct < retention.evict_high_pct < 100):
+        raise ValueError(
+            f"retention watermarks must satisfy 0 < low ({retention.evict_low_pct}) "
+            f"< high ({retention.evict_high_pct}) < 100"
+        )
+
+    return Config(
+        hls_base=raw["hls_base"],
+        sets=sets,
+        recording=_load_recording(raw, project_root),
+        retention=retention,
+    )

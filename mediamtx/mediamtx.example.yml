@@ -3,6 +3,8 @@
 #
 # Keep this file in sync with cameras.yaml: every `enabled: true` camera
 # must have a matching `paths:` entry whose key equals the camera name.
+# (Phase 2 will introduce scripts/render-mediamtx.py to generate this
+# automatically from cameras.yaml.)
 
 logLevel: info
 logDestinations: [stdout]
@@ -12,13 +14,10 @@ rtsp: yes
 rtmp: no
 webrtc: no
 srt: no
-api: no
 metrics: no
-playback: no
 
-# We pull RTSP from cameras and serve HLS to browsers.
-# `rtsp` block above stays on so MediaMTX can be a *client* of the cameras
-# (the rtspAddress server only needs to bind locally; cameras don't push to us).
+# Local RTSP server: lets the FastAPI box (and later inference / SRT push)
+# tap any path via `rtsp://127.0.0.1:8554/<name>`. Cameras don't push to us.
 rtspAddress: 127.0.0.1:8554
 
 hls: yes
@@ -28,16 +27,44 @@ hlsVariant: fmp4
 hlsSegmentCount: 5
 hlsSegmentDuration: 1s
 
+# Playback HTTP API (Phase 1C scrubback UI uses /get and /list).
+# Loopback only — nginx fronts it at /playback/.
+playback: yes
+playbackAddress: 127.0.0.1:9996
+
+# Internal API (path stats, used by tooling). Loopback only.
+api: yes
+apiAddress: 127.0.0.1:9997
+
+# Each camera is a single always-on path. The source is pulled 24/7 so
+# recording captures continuously; the HLS muxer remains on-demand inside
+# MediaMTX (it only emits playlists when a viewer is watching). Multiple
+# consumers (HLS viewer, future inference, future SRT forward) all tap
+# the same path via rtsp://127.0.0.1:8554/<name> — exactly one upstream
+# RTSP session per camera regardless of how many things are reading.
+#
+# Retention is handled by dvr/retention.py, not MediaMTX, so
+# `recordDeleteAfter: 0`.
 paths:
   cam6:
     source: rtsp://admin:CHANGEME@192.168.1.10:8554/Streaming/Channels/101
     rtspTransport: tcp
-    sourceOnDemand: yes
-    sourceOnDemandStartTimeout: 10s
-    sourceOnDemandCloseAfter: 30s
+    sourceOnDemand: no
+    record: yes
+    recordPath: /home/paulm/code/belfry/recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+    recordFormat: fmp4
+    recordSegmentDuration: 1h
+    recordPartDuration: 1s
+    recordDeleteAfter: 0s
 
   # Add more cameras here as they come online. Example:
   # cam5:
   #   source: rtsp://admin:PASS@192.168.1.11:554/Streaming/Channels/101
   #   rtspTransport: tcp
-  #   sourceOnDemand: yes
+  #   sourceOnDemand: no
+  #   record: yes
+  #   recordPath: /home/paulm/code/belfry/recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  #   recordFormat: fmp4
+  #   recordSegmentDuration: 1h
+  #   recordPartDuration: 1s
+  #   recordDeleteAfter: 0

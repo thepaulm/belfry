@@ -5,7 +5,21 @@
 # MediaMTX path key and must be unique across ALL sets.
 # The HLS URL for a camera is ${hls_base}/${name}/index.m3u8.
 
-hls_base: http://localhost:8888
+hls_base: /hls
+
+# Local recording — phase 1.
+# `path` is where MediaMTX writes mp4 segments and where the retention
+# loop scans. Relative paths resolve from the project root.
+recording:
+  path: ./recordings
+
+# Disk-aware retention for the recordings directory.
+# Watermark hysteresis: when usage > evict_high_pct, delete oldest
+# segments globally (across all cameras) until usage < evict_low_pct.
+retention:
+  evict_high_pct: 85
+  evict_low_pct: 80
+  scan_interval_s: 60
 
 sets:
   - id: set1
