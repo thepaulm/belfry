@@ -213,7 +213,9 @@ function enterLiveMode() {
   const hlsUrl = `/hls/${encodeURIComponent(CAM)}/index.m3u8`;
   tearDownLive();
   if (player.canPlayType("application/vnd.apple.mpegurl")) {
+    player.pause();
     player.src = hlsUrl;
+    player.load();
     player.play().catch(() => {});
   } else if (window.Hls && Hls.isSupported()) {
     const hls = new Hls({
@@ -252,11 +254,16 @@ function loadWindow() {
   // user's chosen local moment, and toISOString converts to UTC for the API.
   const target = new Date(dayStart.getTime() + offset * 1000);
   const isoStart = target.toISOString();
-  const url = `/playback/get?path=${encodeURIComponent(CAM)}`
+  // /api/playback/get proxies MediaMTX's /get and adds byte-range support
+  // (iPad Safari refuses to play <video> sources without it).
+  const url = `/api/playback/get?cam=${encodeURIComponent(CAM)}`
     + `&start=${encodeURIComponent(isoStart)}`
-    + `&duration=${WINDOW_S}s`
-    + `&format=mp4`;
+    + `&duration=${WINDOW_S}s`;
+  // Safari (especially iPad) keeps the previous pipeline alive across a bare
+  // src swap — pause + load forces it to actually pick up the new URL.
+  player.pause();
   player.src = url;
+  player.load();
   player.play().catch(() => {});
   windowLabel.textContent = `${fmtClock(offset)} local · ${WINDOW_S / 60}m window`;
 }
@@ -330,8 +337,23 @@ function init() {
     loadWindow();
   });
   scrubber.addEventListener("input", onScrub);
-  scrubber.addEventListener("change", loadWindow);
+  scrubber.addEventListener("change", () => {
+    // change fires on release; cancel any pending input-debounce so we don't
+    // fire two identical loads (the server cache key would race on the partial
+    // file).
+    if (scrubDebounce) {
+      clearTimeout(scrubDebounce);
+      scrubDebounce = null;
+    }
+    loadWindow();
+  });
   goLiveBtn.addEventListener("click", goLive);
+  player.addEventListener("error", () => {
+    const err = player.error;
+    const code = err ? err.code : "?";
+    const msg = err && err.message ? err.message : "media error";
+    statusPill.textContent = `playback error ${code}: ${msg}`;
+  });
   // Keep the live edge moving on today: every 5s, advance scrubber.max.
   // If we're in live mode, also slide the pinned thumb forward.
   setInterval(() => {
@@ -351,6 +373,10 @@ function init() {
   updateCursor();
   updateGoLiveBtn();
   refreshAvailability();
+  // Default to live on page load — opening playback with the slider parked at
+  // 00:00 and nothing playing isn't useful; the user almost always wants
+  // "what's happening now" until they scrub back.
+  goLive();
 }
 
 init();

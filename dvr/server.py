@@ -4,6 +4,8 @@ import asyncio
 import contextlib
 import os
 import secrets
+import uuid
+from hashlib import sha1
 from pathlib import Path
 
 import httpx
@@ -99,6 +101,30 @@ async def api_retention_status(_: str = Depends(require_auth)) -> dict:
 
 _MEDIAMTX_PLAYBACK = "http://127.0.0.1:9996"
 
+# MediaMTX's /get streams chunked MP4 with `Accept-Ranges: none`. iOS Safari
+# (especially iPad) refuses to play a <video> source that doesn't honor Range
+# requests, so we buffer the response to disk on first hit and let FastAPI's
+# FileResponse serve subsequent reads with proper byte-range support.
+_PLAYBACK_CACHE_DIR = config.recording.path.parent / "playback_cache"
+_PLAYBACK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+_PLAYBACK_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
+
+
+def _evict_playback_cache() -> None:
+    files = sorted(
+        _PLAYBACK_CACHE_DIR.glob("*.mp4"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    total = sum(p.stat().st_size for p in files)
+    while total > _PLAYBACK_CACHE_MAX_BYTES and files:
+        oldest = files.pop(0)
+        try:
+            sz = oldest.stat().st_size
+            oldest.unlink()
+            total -= sz
+        except OSError:
+            pass
+
 
 @app.get("/api/playback/list")
 async def api_playback_list(
@@ -114,9 +140,54 @@ async def api_playback_list(
         raise HTTPException(status_code=502, detail=f"mediamtx playback unreachable: {e}")
     if r.status_code != 200:
         raise HTTPException(status_code=r.status_code, detail=r.text)
-    # Strip the absolute internal URL — the browser uses /playback/get directly.
+    # Strip the absolute internal URL — the browser uses /api/playback/get directly.
     ranges = r.json()
     return [{"start": x["start"], "duration": x["duration"]} for x in ranges]
+
+
+@app.get("/api/playback/get")
+async def api_playback_get(
+    cam: str,
+    start: str,
+    duration: str,
+    _: str = Depends(require_auth),
+) -> FileResponse:
+    if cam not in {c.name for c in config.all_cameras}:
+        raise HTTPException(status_code=404, detail=f"unknown camera: {cam}")
+
+    key = sha1(f"{cam}|{start}|{duration}".encode()).hexdigest()
+    cache_path = _PLAYBACK_CACHE_DIR / f"{key}.mp4"
+
+    if not cache_path.exists():
+        # Unique tmp suffix per request — the browser fires two parallel hits
+        # for the same URL on each scrub (one from the input-debounce, one
+        # from the change event). With a shared .partial path they'd race and
+        # one os.replace would yank the file from under the other.
+        tmp_path = cache_path.with_suffix(f".mp4.{uuid.uuid4().hex}.partial")
+        upstream = f"{_MEDIAMTX_PLAYBACK}/get"
+        params = {"path": cam, "start": start, "duration": duration, "format": "mp4"}
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                async with client.stream("GET", upstream, params=params) as r:
+                    if r.status_code != 200:
+                        body = await r.aread()
+                        raise HTTPException(
+                            status_code=r.status_code,
+                            detail=body.decode("latin1", errors="replace"),
+                        )
+                    with tmp_path.open("wb") as f:
+                        async for chunk in r.aiter_bytes(64 * 1024):
+                            f.write(chunk)
+        except httpx.HTTPError as e:
+            tmp_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=502, detail=f"mediamtx unreachable: {e}")
+        os.replace(tmp_path, cache_path)
+        _evict_playback_cache()
+    else:
+        # Bump mtime so LRU eviction treats this as recently used.
+        os.utime(cache_path, None)
+
+    return FileResponse(cache_path, media_type="video/mp4")
 
 
 @app.get("/")

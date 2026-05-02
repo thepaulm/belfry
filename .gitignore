@@ -7,6 +7,7 @@ mediamtx/mediamtx
 mediamtx/mediamtx.yml
 mediamtx/*.tar.gz
 recordings/
+playback_cache/
 *.jpg
 .DS_Store
 .ruff_cache/
