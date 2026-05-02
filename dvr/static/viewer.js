@@ -28,6 +28,11 @@ function makeTile(cam) {
   const host = tile.querySelector(".host");
   host.textContent = cam.host || "";
   host.href = cam.web_url || "#";
+  const playback = tile.querySelector(".playback-link");
+  if (playback) {
+    const setId = currentSetId();
+    playback.href = `/sets/${encodeURIComponent(setId)}/${encodeURIComponent(cam.name)}/playback`;
+  }
   tile.querySelector(".reload").addEventListener("click", () => attach(cam));
   grid.appendChild(tile);
   return tile;

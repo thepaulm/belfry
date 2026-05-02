@@ -205,6 +205,126 @@ main#grid {
   font-weight: 600;
 }
 
+/* ---------- Playback page ---------- */
+
+main#playback {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  min-height: 0;
+}
+
+.playback-video-wrap {
+  flex: 1;
+  background: #000;
+  border-radius: 4px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+#player {
+  width: 100%;
+  height: 100%;
+  display: block;
+  background: #000;
+}
+
+.playback-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6em;
+  padding: 0.5em 0.25em;
+}
+
+.control-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75em;
+  font-size: 0.9rem;
+}
+
+.control-row label {
+  color: var(--muted);
+}
+
+.control-row select {
+  background: #1c1f24;
+  color: var(--fg);
+  border: 1px solid #2a2f37;
+  border-radius: 3px;
+  padding: 0.25em 0.5em;
+  font: inherit;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.timeline {
+  position: relative;
+  padding-top: 0.5em;
+}
+
+#availability {
+  position: relative;
+  height: 6px;
+  background: #1c1f24;
+  border-radius: 2px;
+  margin-bottom: 0.4em;
+  overflow: hidden;
+}
+
+.avail-block {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--accent);
+  opacity: 0.7;
+}
+
+/* Cursor line connecting the scrubber thumb up to the availability bar.
+   .timeline padding-top:0.5em + #availability height:6px = thumb-to-bar
+   distance the line needs to span. */
+#cursor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: calc(0.5em + 6px + 0.4em);
+  width: 2px;
+  margin-left: -1px;
+  background: #ff8a4a;
+  pointer-events: none;
+  z-index: 2;
+}
+
+#scrubber {
+  width: 100%;
+  margin: 0;
+  position: relative;
+  z-index: 1;
+}
+
+.timeline .ticks {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin-top: 0.2em;
+}
+
+.tile .playback-link {
+  margin-left: auto;
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 0.85rem;
+}
+
+.tile .playback-link:hover { text-decoration: underline; }
+
 @media (max-width: 768px), (max-height: 500px) {
   html, body {
     height: auto;

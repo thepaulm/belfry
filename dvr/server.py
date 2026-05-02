@@ -97,6 +97,28 @@ async def api_retention_status(_: str = Depends(require_auth)) -> dict:
     return retention_loop.status_dict()
 
 
+_MEDIAMTX_PLAYBACK = "http://127.0.0.1:9996"
+
+
+@app.get("/api/playback/list")
+async def api_playback_list(
+    cam: str, _: str = Depends(require_auth)
+) -> list[dict]:
+    """Available recorded ranges for a camera, proxied so HTTP Basic gates it."""
+    if cam not in {c.name for c in config.all_cameras}:
+        raise HTTPException(status_code=404, detail=f"unknown camera: {cam}")
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{_MEDIAMTX_PLAYBACK}/list", params={"path": cam})
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"mediamtx playback unreachable: {e}")
+    if r.status_code != 200:
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+    # Strip the absolute internal URL — the browser uses /playback/get directly.
+    ranges = r.json()
+    return [{"start": x["start"], "duration": x["duration"]} for x in ranges]
+
+
 @app.get("/")
 async def index(_: str = Depends(require_auth)):
     if not config.sets:
@@ -127,6 +149,16 @@ async def view_set(set_id: str, _: str = Depends(require_auth)) -> FileResponse:
     s = _resolve_set(set_id)
     _kick_warmups(s)
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/sets/{set_id}/{cam}/playback")
+async def view_playback(
+    set_id: str, cam: str, _: str = Depends(require_auth)
+) -> FileResponse:
+    s = _resolve_set(set_id)
+    if cam not in {c.name for c in s.cameras}:
+        raise HTTPException(status_code=404, detail=f"camera {cam!r} not in set {set_id!r}")
+    return FileResponse(STATIC_DIR / "playback.html")
 
 
 @app.get("/static/{path:path}")
