@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import secrets
 from pathlib import Path
@@ -12,6 +13,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from .config import Camera, CameraSet, load_config
 from .health import probe_all
+from .retention import RetentionLoop
 
 # MediaMTX HLS lives on this box; warmup hits it directly, bypassing nginx.
 _MEDIAMTX_HLS = "http://127.0.0.1:8888"
@@ -23,7 +25,19 @@ config = load_config(PROJECT_ROOT / "cameras.yaml")
 USERNAME = os.environ.get("DVR_USERNAME", "admin")
 PASSWORD = os.environ["DVR_PASSWORD"]  # required; fail fast if absent
 
-app = FastAPI(title="homecam-dvr")
+retention_loop = RetentionLoop(config.recording, config.retention)
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_: FastAPI):
+    retention_loop.start()
+    try:
+        yield
+    finally:
+        await retention_loop.stop()
+
+
+app = FastAPI(title="homecam-dvr", lifespan=_lifespan)
 _basic = HTTPBasic()
 
 
@@ -76,6 +90,11 @@ async def api_set_health(set_id: str, _: str = Depends(require_auth)) -> list[di
     s = _resolve_set(set_id)
     probes = await probe_all(s.cameras)
     return [{"name": p.name, "status": p.status, "checked_at": p.checked_at} for p in probes]
+
+
+@app.get("/api/retention/status")
+async def api_retention_status(_: str = Depends(require_auth)) -> dict:
+    return retention_loop.status_dict()
 
 
 @app.get("/")
