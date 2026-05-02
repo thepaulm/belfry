@@ -6,13 +6,19 @@ yellowchicken.io {
 	}
 
 	# Everything else: gate via oauth2-proxy, then proxy to the reverse-SSH
-	# tunnel into the Orin. forward_auth returns 401 on a missing/expired
-	# session; the handle_errors block below turns that into a redirect to
-	# the Google login flow rather than a bare "Unauthorized" page.
+	# tunnel into the Orin. forward_auth's default behavior is to copy the
+	# auth provider's response (a 401 with body) straight back to the
+	# client; @bad-status + handle_response catches that and redirects to
+	# the OAuth start endpoint instead, which kicks off the Google flow.
 	handle {
 		forward_auth 127.0.0.1:4180 {
 			uri /oauth2/auth
 			copy_headers X-Auth-Request-Email X-Auth-Request-User
+
+			@bad-status status 401
+			handle_response @bad-status {
+				redir /oauth2/start?rd={uri} 302
+			}
 		}
 		reverse_proxy 127.0.0.1:8080 {
 			transport http {
@@ -20,9 +26,5 @@ yellowchicken.io {
 				write_timeout 300s
 			}
 		}
-	}
-
-	handle_errors 401 {
-		redir /oauth2/start?rd={uri} 302
 	}
 }
