@@ -19,7 +19,7 @@ case "$OS-$ARCH" in
     darwin-arm64)  ASSET="mediamtx_${VERSION}_darwin_arm64.tar.gz" ;;
     darwin-x86_64) ASSET="mediamtx_${VERSION}_darwin_amd64.tar.gz" ;;
     linux-x86_64)  ASSET="mediamtx_${VERSION}_linux_amd64.tar.gz" ;;
-    linux-aarch64) ASSET="mediamtx_${VERSION}_linux_arm64v8.tar.gz" ;;
+    linux-aarch64) ASSET="mediamtx_${VERSION}_linux_arm64.tar.gz" ;;
     *) echo "unsupported host: $OS-$ARCH" >&2; exit 1 ;;
 esac
 
