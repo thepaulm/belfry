@@ -259,6 +259,25 @@ main#playback {
   font: inherit;
 }
 
+#go-live {
+  background: #1c1f24;
+  color: var(--fg);
+  border: 1px solid #2a2f37;
+  border-radius: 3px;
+  padding: 0.25em 0.7em;
+  font: inherit;
+  cursor: pointer;
+}
+
+#go-live:hover {
+  background: #262a31;
+}
+
+#go-live.active {
+  border-color: #c44;
+  color: #ff5a5a;
+}
+
 .muted {
   color: var(--muted);
   font-size: 0.85rem;

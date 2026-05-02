@@ -4,15 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>homecam · playback</title>
-  <link rel="stylesheet" href="/static/viewer.css?v=12">
+  <link rel="stylesheet" href="/static/viewer.css?v=14">
   <script defer src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
-  <script defer src="/static/playback.js?v=12"></script>
+  <script defer src="/static/playback.js?v=13"></script>
 </head>
 <body class="playback-body">
   <header>
     <h1>homecam</h1>
     <nav id="set-nav">
-      <a id="back-to-set" href="/">&larr; live</a>
+      <a id="back-to-set" href="/">&larr; All cameras</a>
     </nav>
     <span id="status" class="status-pill"></span>
   </header>
@@ -24,6 +24,7 @@
       <div class="control-row">
         <label for="day-picker">Day</label>
         <select id="day-picker"></select>
+        <button id="go-live" type="button">● Go Live</button>
         <span id="window-label" class="muted"></span>
       </div>
       <div class="timeline">

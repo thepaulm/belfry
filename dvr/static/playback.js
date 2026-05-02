@@ -21,6 +21,7 @@ const availability = document.getElementById("availability");
 const cursor = document.getElementById("cursor");
 const windowLabel = document.getElementById("window-label");
 const backLink = document.getElementById("back-to-set");
+const goLiveBtn = document.getElementById("go-live");
 
 if (SET_ID && CAM) {
   backLink.href = `/sets/${encodeURIComponent(SET_ID)}`;
@@ -207,6 +208,7 @@ function enterLiveMode() {
     requestAnimationFrame(updateCursor);
   }
   windowLabel.textContent = "LIVE";
+  updateGoLiveBtn();
 
   const hlsUrl = `/hls/${encodeURIComponent(CAM)}/index.m3u8`;
   tearDownLive();
@@ -244,6 +246,7 @@ function loadWindow() {
 
   mode = "past";
   tearDownLive();
+  updateGoLiveBtn();
   const dayStart = selectedDayStart();
   // dayStart is local-midnight; adding offset seconds gives a Date at the
   // user's chosen local moment, and toISOString converts to UTC for the API.
@@ -278,6 +281,32 @@ function updateCursor() {
   cursor.style.left = `${x}px`;
 }
 
+function updateGoLiveBtn() {
+  // Show "LIVE" with an active style while pinned to the live edge; otherwise
+  // it's a normal "Go Live" affordance.
+  const live = mode === "live";
+  goLiveBtn.classList.toggle("active", live);
+  goLiveBtn.textContent = live ? "● LIVE" : "● Go Live";
+}
+
+function goLive() {
+  // Jump to today's live edge regardless of which day is currently selected.
+  const todayMs = startOfLocalDay(new Date()).getTime();
+  if (parseInt(dayPicker.value, 10) !== todayMs) {
+    dayPicker.value = String(todayMs);
+    applyScrubberMax();
+    renderTicks();
+    renderAvailabilityBar();
+  }
+  if (scrubDebounce) {
+    clearTimeout(scrubDebounce);
+    scrubDebounce = null;
+  }
+  const live = liveEdgeOfSelectedDay();
+  if (live !== null) scrubber.value = String(live);
+  loadWindow();
+}
+
 function onScrub() {
   const offset = parseInt(scrubber.value, 10);
   windowLabel.textContent = `${fmtClock(offset)} local · drag and release to load`;
@@ -302,6 +331,7 @@ function init() {
   });
   scrubber.addEventListener("input", onScrub);
   scrubber.addEventListener("change", loadWindow);
+  goLiveBtn.addEventListener("click", goLive);
   // Keep the live edge moving on today: every 5s, advance scrubber.max.
   // If we're in live mode, also slide the pinned thumb forward.
   setInterval(() => {
@@ -319,6 +349,7 @@ function init() {
   // currently-being-written one with its duration-so-far.
   setInterval(refreshAvailability, 15000);
   updateCursor();
+  updateGoLiveBtn();
   refreshAvailability();
 }
 
