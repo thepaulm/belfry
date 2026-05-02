@@ -1,0 +1,19 @@
+[Unit]
+Description=oauth2-proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/oauth2-proxy/oauth2-proxy.env
+ExecStart=/usr/local/bin/oauth2-proxy --config /etc/oauth2-proxy/oauth2-proxy.cfg
+Restart=on-failure
+RestartSec=5
+User=oauth2-proxy
+Group=oauth2-proxy
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

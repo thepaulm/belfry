@@ -3,16 +3,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import secrets
 import uuid
 from hashlib import sha1
 from pathlib import Path
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
+from .auth import require_auth
 from .config import Camera, CameraSet, load_config
 from .health import probe_all
 from .retention import RetentionLoop
@@ -24,8 +23,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 config = load_config(PROJECT_ROOT / "cameras.yaml")
-USERNAME = os.environ.get("DVR_USERNAME", "admin")
-PASSWORD = os.environ["DVR_PASSWORD"]  # required; fail fast if absent
 
 retention_loop = RetentionLoop(config.recording, config.retention)
 
@@ -40,19 +37,6 @@ async def _lifespan(_: FastAPI):
 
 
 app = FastAPI(title="homecam-dvr", lifespan=_lifespan)
-_basic = HTTPBasic()
-
-
-def require_auth(creds: HTTPBasicCredentials = Depends(_basic)) -> str:
-    user_ok = secrets.compare_digest(creds.username.encode(), USERNAME.encode())
-    pass_ok = secrets.compare_digest(creds.password.encode(), PASSWORD.encode())
-    if not (user_ok and pass_ok):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="invalid credentials",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return creds.username
 
 
 def _camera_payload(c: Camera) -> dict:

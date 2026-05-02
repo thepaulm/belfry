@@ -8,6 +8,7 @@ mediamtx/mediamtx.yml
 mediamtx/*.tar.gz
 recordings/
 playback_cache/
+cloud/oauth2-proxy.env
 *.jpg
 .DS_Store
 .ruff_cache/

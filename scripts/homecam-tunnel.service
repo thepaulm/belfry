@@ -1,0 +1,27 @@
+[Unit]
+Description=homecam reverse SSH tunnel to EC2
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=paulm
+# Two reverse forwards land on EC2's loopback only (sshd's GatewayPorts=no
+# default keeps them off the public interface):
+#   :8080 → Orin :80   — Caddy reverse-proxies into this for the public site
+#   :2222 → Orin :22   — `ssh -J yellowchicken.io paulm@127.0.0.1 -p 2222`
+#                        from a laptop while travelling
+Environment="AUTOSSH_GATETIME=0"
+ExecStart=/usr/bin/autossh -M 0 -N \
+  -o ServerAliveInterval=15 \
+  -o ServerAliveCountMax=3 \
+  -o ExitOnForwardFailure=yes \
+  -o StrictHostKeyChecking=accept-new \
+  -i /home/paulm/.ssh/bellfry_login \
+  -R 127.0.0.1:8080:127.0.0.1:80 \
+  -R 127.0.0.1:2222:127.0.0.1:22 \
+  paulm@yellowchicken.io
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
