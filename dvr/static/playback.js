@@ -60,9 +60,38 @@ function populateDayPicker() {
     const opt = document.createElement("option");
     // Store the local-midnight epoch ms as the option value.
     opt.value = String(d.getTime());
-    opt.textContent = (i === 0 ? "today · " : i === 1 ? "yesterday · " : "")
-      + fmtDayLabel(d);
     dayPicker.appendChild(opt);
+  }
+  relabelDayPicker();
+}
+
+function daysWithData() {
+  const out = new Set();
+  for (const r of availableRanges) {
+    const start = new Date(r.start);
+    const end = new Date(start.getTime() + r.duration * 1000);
+    const cursor = startOfLocalDay(start);
+    while (cursor.getTime() <= end.getTime()) {
+      out.add(cursor.getTime());
+      cursor.setDate(cursor.getDate() + 1);
+    }
+  }
+  return out;
+}
+
+function relabelDayPicker() {
+  const todayMs = startOfLocalDay(new Date()).getTime();
+  const yesterdayMs = todayMs - 86400_000;
+  const days = daysWithData();
+  for (const opt of dayPicker.options) {
+    const dayMs = parseInt(opt.value, 10);
+    const marker = days.has(dayMs) ? "● " : "○ ";
+    const prefix = dayMs === todayMs
+      ? "today · "
+      : dayMs === yesterdayMs
+        ? "yesterday · "
+        : "";
+    opt.textContent = marker + prefix + fmtDayLabel(new Date(dayMs));
   }
 }
 
@@ -80,6 +109,7 @@ async function refreshAvailability() {
     return;
   }
   renderAvailabilityBar();
+  relabelDayPicker();
   statusPill.textContent = `${availableRanges.length} segment${
     availableRanges.length === 1 ? "" : "s"
   }`;
