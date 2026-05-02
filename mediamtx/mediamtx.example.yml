@@ -26,6 +26,11 @@ hlsAllowOrigins: ['*']
 hlsVariant: fmp4
 hlsSegmentCount: 5
 hlsSegmentDuration: 1s
+# Keep an HLS muxer running for every published path even when no reader
+# is connected. Without this, navigating between sets tears down the
+# previous set's muxers, so coming back forces a cold start (cookie-check
+# redirect + initial segment fill) that sometimes outruns hls.js retries.
+hlsAlwaysRemux: yes
 
 # Playback HTTP API (Phase 1C scrubback UI uses /get and /list).
 # Loopback only — nginx fronts it at /playback/.

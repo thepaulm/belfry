@@ -51,7 +51,11 @@ function makeEmptyTile() {
   grid.appendChild(tile);
 }
 
-function attach(cam) {
+// Re-attach a tile that hit a fatal hls.js error after a delay, with a
+// small backoff. Resets the counter on success.
+const REATTACH_DELAYS_MS = [3000, 8000, 20000];
+
+function attach(cam, attempt = 0) {
   const entry = players.get(cam.name);
   if (!entry) return;
   const { video, tile } = entry;
@@ -59,6 +63,10 @@ function attach(cam) {
   if (entry.hls) {
     entry.hls.destroy();
     entry.hls = null;
+  }
+  if (entry.reattachTimer) {
+    clearTimeout(entry.reattachTimer);
+    entry.reattachTimer = null;
   }
 
   if (!cam.hls_url) {
@@ -74,9 +82,6 @@ function attach(cam) {
       lowLatencyMode: true,
       liveSyncDurationCount: 2,
       maxLiveSyncPlaybackRate: 1.2,
-      // MediaMTX runs sources on-demand, so the first manifest load almost
-      // always 404s while the RTSP source is starting up. Retry long enough
-      // to ride out the source startup (sourceOnDemandStartTimeout=10s).
       manifestLoadingMaxRetry: 8,
       manifestLoadingRetryDelay: 500,
       manifestLoadingMaxRetryTimeout: 4000,
@@ -86,11 +91,23 @@ function attach(cam) {
     hls.loadSource(cam.hls_url);
     hls.attachMedia(video);
     hls.on(Hls.Events.ERROR, (_, data) => {
-      if (data.fatal) {
+      if (!data.fatal) return;
+      hls.destroy();
+      entry.hls = null;
+      const delay = REATTACH_DELAYS_MS[attempt];
+      if (delay !== undefined) {
         setState(tile, "offline");
-        hls.destroy();
-        entry.hls = null;
+        entry.reattachTimer = setTimeout(() => {
+          entry.reattachTimer = null;
+          attach(cam, attempt + 1);
+        }, delay);
+      } else {
+        setState(tile, "offline");
       }
+    });
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      // Successful start — reset attempt counter for any future failures.
+      attempt = 0;
     });
     entry.hls = hls;
   } else {
