@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import secrets
 from pathlib import Path
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
-from .config import Camera, load_config
+from .config import Camera, CameraSet, load_config
 from .health import probe_all
+
+# MediaMTX HLS lives on this box; warmup hits it directly, bypassing nginx.
+_MEDIAMTX_HLS = "http://127.0.0.1:8888"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -80,9 +85,28 @@ async def index(_: str = Depends(require_auth)):
     return RedirectResponse(url=f"/sets/{config.sets[0].id}", status_code=302)
 
 
+async def _warm_source(name: str) -> None:
+    # Touching the manifest triggers MediaMTX's on-demand source startup.
+    # Fire-and-forget; the browser's own request a moment later will see
+    # the source already coming up.
+    url = f"{_MEDIAMTX_HLS}/{name}/index.m3u8"
+    try:
+        async with httpx.AsyncClient(timeout=2.0, follow_redirects=True) as client:
+            await client.get(url)
+    except Exception:
+        pass
+
+
+def _kick_warmups(s: CameraSet) -> None:
+    for cam in s.cameras:
+        if cam.enabled:
+            asyncio.create_task(_warm_source(cam.name))
+
+
 @app.get("/sets/{set_id}")
 async def view_set(set_id: str, _: str = Depends(require_auth)) -> FileResponse:
-    _resolve_set(set_id)  # 404 if unknown
+    s = _resolve_set(set_id)
+    _kick_warmups(s)
     return FileResponse(STATIC_DIR / "index.html")
 
 

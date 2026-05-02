@@ -11,6 +11,7 @@ recordings/
 .DS_Store
 .ruff_cache/
 .pytest_cache/
+runme.sh
 
 # Personal recon / runbook notes — contain real credentials, MACs, and
 # host-specific details. Kept locally, not committed.

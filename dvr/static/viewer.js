@@ -63,6 +63,14 @@ function attach(cam) {
       lowLatencyMode: true,
       liveSyncDurationCount: 2,
       maxLiveSyncPlaybackRate: 1.2,
+      // MediaMTX runs sources on-demand, so the first manifest load almost
+      // always 404s while the RTSP source is starting up. Retry long enough
+      // to ride out the source startup (sourceOnDemandStartTimeout=10s).
+      manifestLoadingMaxRetry: 8,
+      manifestLoadingRetryDelay: 500,
+      manifestLoadingMaxRetryTimeout: 4000,
+      levelLoadingMaxRetry: 6,
+      levelLoadingRetryDelay: 500,
     });
     hls.loadSource(cam.hls_url);
     hls.attachMedia(video);
