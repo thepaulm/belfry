@@ -8,10 +8,9 @@ from hashlib import sha1
 from pathlib import Path
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 
-from .auth import require_auth
 from .config import Camera, CameraSet, load_config
 from .health import probe_all
 from .retention import RetentionLoop
@@ -58,7 +57,7 @@ def _resolve_set(set_id: str):
 
 
 @app.get("/api/sets")
-async def api_sets(_: str = Depends(require_auth)) -> list[dict]:
+async def api_sets() -> list[dict]:
     return [
         {"id": s.id, "label": s.label, "camera_count": len(s.cameras)}
         for s in config.sets
@@ -66,20 +65,20 @@ async def api_sets(_: str = Depends(require_auth)) -> list[dict]:
 
 
 @app.get("/api/sets/{set_id}/cameras")
-async def api_set_cameras(set_id: str, _: str = Depends(require_auth)) -> list[dict]:
+async def api_set_cameras(set_id: str) -> list[dict]:
     s = _resolve_set(set_id)
     return [_camera_payload(c) for c in s.cameras]
 
 
 @app.get("/api/sets/{set_id}/health")
-async def api_set_health(set_id: str, _: str = Depends(require_auth)) -> list[dict]:
+async def api_set_health(set_id: str) -> list[dict]:
     s = _resolve_set(set_id)
     probes = await probe_all(s.cameras)
     return [{"name": p.name, "status": p.status, "checked_at": p.checked_at} for p in probes]
 
 
 @app.get("/api/retention/status")
-async def api_retention_status(_: str = Depends(require_auth)) -> dict:
+async def api_retention_status() -> dict:
     return retention_loop.status_dict()
 
 
@@ -111,10 +110,9 @@ def _evict_playback_cache() -> None:
 
 
 @app.get("/api/playback/list")
-async def api_playback_list(
-    cam: str, _: str = Depends(require_auth)
-) -> list[dict]:
-    """Available recorded ranges for a camera, proxied so HTTP Basic gates it."""
+async def api_playback_list(cam: str) -> list[dict]:
+    """Available recorded ranges for a camera, proxied so the cloud OAuth gate
+    sits in front of MediaMTX."""
     if cam not in {c.name for c in config.all_cameras}:
         raise HTTPException(status_code=404, detail=f"unknown camera: {cam}")
     try:
@@ -134,7 +132,6 @@ async def api_playback_get(
     cam: str,
     start: str,
     duration: str,
-    _: str = Depends(require_auth),
 ) -> FileResponse:
     if cam not in {c.name for c in config.all_cameras}:
         raise HTTPException(status_code=404, detail=f"unknown camera: {cam}")
@@ -175,7 +172,7 @@ async def api_playback_get(
 
 
 @app.get("/")
-async def index(_: str = Depends(require_auth)):
+async def index():
     if not config.sets:
         raise HTTPException(status_code=500, detail="no camera sets configured")
     return RedirectResponse(url=f"/sets/{config.sets[0].id}", status_code=302)
@@ -200,16 +197,14 @@ def _kick_warmups(s: CameraSet) -> None:
 
 
 @app.get("/sets/{set_id}")
-async def view_set(set_id: str, _: str = Depends(require_auth)) -> FileResponse:
+async def view_set(set_id: str) -> FileResponse:
     s = _resolve_set(set_id)
     _kick_warmups(s)
     return FileResponse(STATIC_DIR / "index.html")
 
 
 @app.get("/sets/{set_id}/{cam}/playback")
-async def view_playback(
-    set_id: str, cam: str, _: str = Depends(require_auth)
-) -> FileResponse:
+async def view_playback(set_id: str, cam: str) -> FileResponse:
     s = _resolve_set(set_id)
     if cam not in {c.name for c in s.cameras}:
         raise HTTPException(status_code=404, detail=f"camera {cam!r} not in set {set_id!r}")
@@ -217,7 +212,7 @@ async def view_playback(
 
 
 @app.get("/static/{path:path}")
-async def static_files(path: str, _: str = Depends(require_auth)) -> FileResponse:
+async def static_files(path: str) -> FileResponse:
     target = (STATIC_DIR / path).resolve()
     if not target.is_file() or STATIC_DIR.resolve() not in target.parents:
         raise HTTPException(status_code=404)

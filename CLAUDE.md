@@ -15,7 +15,6 @@ Self-hosted DVR for Interlogix TVB-5301 cameras (OEM Hikvision) on a dedicated, 
 - `recordings/` — gitignored, on the 3.6 TB NVMe (`/dev/nvme0n1p1`). One subdir per camera (`recordings/cam5/...`). MediaMTX writes 1-hour fMP4 segments here.
 - `scripts/run.sh` — starts MediaMTX + uvicorn together; cleans up on Ctrl-C. Invoked by the `homecam` systemd unit at `/etc/systemd/system/homecam.service`.
 - `scripts/install-mediamtx.sh` — fetches the MediaMTX binary for the host arch.
-- `.env` — `DVR_USERNAME` / `DVR_PASSWORD` for HTTP Basic auth on the viewer. Gitignored.
 - `runme.sh` — gitignored throwaway shell script. Convention: when something needs sudo, write the steps here for the user to run from their own terminal.
 
 ## Path topology in MediaMTX
@@ -48,7 +47,7 @@ cameras.yaml groups cameras into named **sets** (e.g. `set1`, `set2`). The DVR h
 
 - 24/7 recording. Each camera writes 1-hour fMP4 segments (`recordSegmentDuration: 1h`, `recordPartDuration: 1s`).
 - Disk-aware retention runs as a FastAPI lifespan task (`dvr/retention.py`). Every `scan_interval_s` (default 60s) it `shutil.disk_usage`s the recordings volume; if usage > `evict_high_pct` (default 85), it deletes oldest mp4 files globally until usage < `evict_low_pct` (default 80). Files modified within the last 70 minutes are protected so MediaMTX never has its in-progress segment yanked. Per-camera dirs share the disk fairly under "oldest-globally" because all 8 cams record at similar bitrate.
-- Status visible at `GET /api/retention/status` (HTTPBasic-gated). Eviction events log to journald under `homecam`.
+- Status visible at `GET /api/retention/status`. Eviction events log to journald under `homecam`.
 
 ## Scrubback UI
 

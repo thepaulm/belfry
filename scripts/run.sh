@@ -6,13 +6,6 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-if [[ -f .env ]]; then
-    set -a
-    # shellcheck disable=SC1091
-    source .env
-    set +a
-fi
-
 if [[ ! -x mediamtx/mediamtx ]]; then
     echo "mediamtx binary not found — run scripts/install-mediamtx.sh" >&2
     exit 1
@@ -20,11 +13,6 @@ fi
 
 if [[ ! -f cameras.yaml ]]; then
     echo "cameras.yaml not found — copy cameras.example.yaml and edit" >&2
-    exit 1
-fi
-
-if [[ -z "${DVR_PASSWORD:-}" ]]; then
-    echo "DVR_PASSWORD not set (in .env or environment)" >&2
     exit 1
 fi
 
