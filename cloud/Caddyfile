@@ -1,29 +1,28 @@
 yellowchicken.io {
-	# Every request first goes through oauth2-proxy. If the user is not
-	# authenticated, oauth2-proxy returns a 401 and Caddy aborts the
-	# request — for browser navigations Caddy forwards the redirect that
-	# oauth2-proxy emits, so the user lands on the Google login page.
-	forward_auth 127.0.0.1:4180 {
-		uri /oauth2/auth
-		copy_headers X-Auth-Request-Email X-Auth-Request-User
-	}
-
-	# /oauth2/* (callback, sign-in form, sign-out) goes straight to
-	# oauth2-proxy, not the Orin upstream.
+	# /oauth2/* (callback, sign_in, start, sign_out) IS the auth provider —
+	# must not be gated by forward_auth or we'd loop on the login URL itself.
 	handle /oauth2/* {
 		reverse_proxy 127.0.0.1:4180
 	}
 
-	# Everything else flows through the reverse SSH tunnel into the
-	# Orin's nginx (which fans out to FastAPI / MediaMTX HLS / playback).
-	# Long-window MP4 fetches need a generous timeout because the Orin
-	# may be downloading a fresh segment from MediaMTX before responding.
+	# Everything else: gate via oauth2-proxy, then proxy to the reverse-SSH
+	# tunnel into the Orin. forward_auth returns 401 on a missing/expired
+	# session; the handle_errors block below turns that into a redirect to
+	# the Google login flow rather than a bare "Unauthorized" page.
 	handle {
+		forward_auth 127.0.0.1:4180 {
+			uri /oauth2/auth
+			copy_headers X-Auth-Request-Email X-Auth-Request-User
+		}
 		reverse_proxy 127.0.0.1:8080 {
 			transport http {
 				read_timeout 300s
 				write_timeout 300s
 			}
 		}
+	}
+
+	handle_errors 401 {
+		redir /oauth2/start?rd={uri} 302
 	}
 }
