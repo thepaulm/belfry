@@ -53,21 +53,17 @@ class Inference:
     # Model files. Resolved relative to project root if not absolute.
     # `.engine` (TensorRT) preferred for speed; falls back to `.pt` (PyTorch
     # CUDA) when the engine doesn't exist on disk yet.
-    megadetector_pt: Path
-    megadetector_engine: Path
     yolo_pt: Path
     yolo_engine: Path
-    # Effective day-1 active classes after the IoU merge between MegaDetector
-    # ({person, animal, vehicle}) and YOLO11 COCO ({person, dog, cat, bird,
-    # car, truck}). Anything not in this set is dropped at write time.
+    # Active classes (subset of COCO). Anything not in this set is dropped
+    # at write time. The detector additionally restricts to a hard-coded
+    # COCO subset so out-of-domain classes (toaster, frisbee, etc.) never
+    # leak through even if the config opens them up.
     event_classes: tuple[str, ...]
     # Single default confidence threshold; per-class overrides win when the
     # class key is present.
     conf_threshold: float
     class_thresholds: dict[str, float]
-    # IoU above which a MegaDetector det and a YOLO det are considered the
-    # same object — the more specific COCO label then wins.
-    merge_iou: float
     # Coalescing window: same (camera, class) detections within this many
     # seconds extend a single event row instead of opening a new one.
     cooldown_s: int
@@ -123,27 +119,19 @@ def _load_inference(raw: dict, project_root: Path, recording: Recording) -> Infe
     classes = tuple(
         block.get(
             "event_classes",
-            ["person", "dog", "cat", "bird", "car", "truck", "animal"],
+            ["person", "dog", "cat", "bird", "car", "truck"],
         )
     )
     return Inference(
-        megadetector_pt=_resolve(
-            block.get("megadetector_pt", "inference/megadetector.pt"), project_root
-        ),
-        megadetector_engine=_resolve(
-            block.get("megadetector_engine", "inference/megadetector.engine"),
-            project_root,
-        ),
         yolo_pt=_resolve(
-            block.get("yolo_pt", "inference/yolo11n.pt"), project_root
+            block.get("yolo_pt", "inference/yolo11l.pt"), project_root
         ),
         yolo_engine=_resolve(
-            block.get("yolo_engine", "inference/yolo11n.engine"), project_root
+            block.get("yolo_engine", "inference/yolo11l.engine"), project_root
         ),
         event_classes=classes,
         conf_threshold=float(block.get("conf_threshold", 0.40)),
         class_thresholds={k: float(v) for k, v in (block.get("class_thresholds") or {}).items()},
-        merge_iou=float(block.get("merge_iou", 0.5)),
         cooldown_s=int(block.get("cooldown_s", 10)),
         record_fps=int(block.get("record_fps", 1)),
         live_fps=int(block.get("live_fps", 5)),

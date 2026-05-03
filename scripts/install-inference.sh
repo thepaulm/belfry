@@ -4,8 +4,8 @@
 #      tag of NVIDIA's Jetson PyTorch wheels — the main DVR's Python
 #      3.14 uv venv won't fit those).
 #   2. Install Jetson torch + ultralytics + opencv-python.
-#   3. Download MegaDetector v6 + YOLO11n weights.
-#   4. Build TensorRT engines (one-time per device).
+#   3. Download YOLO11l weights.
+#   4. Build TensorRT engine (one-time per device).
 #
 # Run from the repo root:   scripts/install-inference.sh
 # Re-runnable; skips work that's already done.
@@ -143,34 +143,18 @@ fi
 # --- weights ------------------------------------------------------------
 mkdir -p inference
 
-if [[ ! -f inference/yolo11n.pt ]]; then
-    echo "==> downloading YOLO11n COCO weights"
-    # ultralytics will fetch + cache yolo11n.pt on first construction.
+if [[ ! -f inference/yolo11l.pt ]]; then
+    echo "==> downloading YOLO11l COCO weights"
+    # ultralytics will fetch + cache yolo11l.pt on first construction.
     python -c "
 from ultralytics import YOLO
 import shutil
-m = YOLO('yolo11n.pt')
-shutil.copy(m.ckpt_path, 'inference/yolo11n.pt')
+m = YOLO('yolo11l.pt')
+shutil.copy(m.ckpt_path, 'inference/yolo11l.pt')
 "
 fi
 
-if [[ ! -f inference/megadetector.pt ]]; then
-    echo "==> downloading MegaDetector v1000 (Larch / YOLO11L) weights"
-    # MegaDetector v1000 ships five variants (cedar/larch/redwood/sorrel/
-    # spruce). Larch is YOLO11L at 640 px — native Ultralytics loader,
-    # 0.969 AP, fits well alongside YOLO11n COCO on the Orin's GPU.
-    # Redwood (YOLOv5x6 @ 1280) is more accurate but ~5x heavier;
-    # cedar (YOLOv9c) needs an extra yolov9pip dep we don't want.
-    MD_URL="https://github.com/agentmorris/MegaDetector/releases/download/v1000.0/md_v1000.0.0-larch.pt"
-    curl -L --fail -o inference/megadetector.pt "$MD_URL" || {
-        echo "MegaDetector download failed. Fetch md_v1000.0.0-larch.pt manually from"
-        echo "  https://github.com/agentmorris/MegaDetector/releases/tag/v1000.0"
-        echo "and drop it at inference/megadetector.pt, then re-run."
-        exit 1
-    }
-fi
-
-# --- tensorrt engines ---------------------------------------------------
+# --- tensorrt engine ----------------------------------------------------
 # Engines are device-specific so they can't be checked into the repo;
 # build once per Orin. Skip if the .engine already exists.
 build_engine() {
@@ -180,14 +164,13 @@ build_engine() {
         echo "==> $engine already built, skipping"
         return
     fi
-    echo "==> exporting $pt to TensorRT FP16 (1–2 min)"
+    echo "==> exporting $pt to TensorRT FP16 (~3 min for YOLO11l)"
     python -c "
 from ultralytics import YOLO
 YOLO('$pt').export(format='engine', half=True, device=0, imgsz=640)
 "
 }
-build_engine inference/yolo11n.pt
-build_engine inference/megadetector.pt
+build_engine inference/yolo11l.pt
 
 echo
 echo "Done. Smoke-test:"

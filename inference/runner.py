@@ -97,14 +97,11 @@ def main() -> int:
 
     inf = cfg.inference
     detector = Detector(
-        megadetector_pt=inf.megadetector_pt,
-        megadetector_engine=inf.megadetector_engine,
         yolo_pt=inf.yolo_pt,
         yolo_engine=inf.yolo_engine,
         event_classes=inf.event_classes,
         conf_threshold=inf.conf_threshold,
         class_thresholds=inf.class_thresholds,
-        merge_iou=inf.merge_iou,
     )
     # Make the detector reachable to /playback inside the FastAPI app.
     inference_app.state.detector = detector
