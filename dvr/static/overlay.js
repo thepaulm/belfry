@@ -28,6 +28,14 @@ function colorFor(cls) {
   return CLASS_COLOR[cls] || DEFAULT_COLOR;
 }
 
+// Registry of live overlays so the labels-toggle can fan out start /
+// stop calls. We open the SSE connection lazily — only while the
+// "Show labels" toggle is on — because each EventSource holds a
+// dedicated TCP connection, and at 4–8 tiles we'd otherwise exhaust
+// the browser's HTTP/1.1 per-origin limit (6) and starve the HLS
+// playlist + segment requests, breaking video playback.
+const _overlays = new Set();
+
 class BoxOverlay {
   // host: a parent element (typically .video-wrap) that already has
   // position: relative. cam: camera name. The canvas inherits the
@@ -44,14 +52,26 @@ class BoxOverlay {
     this._ro = new ResizeObserver(() => this._resizeToHost());
     this._ro.observe(this.host);
     this._resizeToHost();
+    _overlays.add(this);
+    if (document.body.classList.contains("labels-on")) this.start();
+  }
+
+  start() {
+    if (this._es) return;
     this._connect();
   }
 
-  destroy() {
+  stop() {
     if (this._es) {
       this._es.close();
       this._es = null;
     }
+    this._clear();
+  }
+
+  destroy() {
+    _overlays.delete(this);
+    this.stop();
     if (this._ro) {
       this._ro.disconnect();
       this._ro = null;
@@ -128,9 +148,19 @@ class BoxOverlay {
   }
 }
 
-// "Show labels" toggle wiring shared across pages. CSS rule on
-// body.labels-on .overlay-canvas controls visibility; the SSE
-// connection is unaffected so flipping the toggle is instant.
+function setAllOverlays(on) {
+  for (const o of _overlays) {
+    if (on) o.start();
+    else o.stop();
+  }
+}
+
+// "Show labels" toggle wiring shared across pages. Toggling flips the
+// body class (CSS hides/shows the canvas) AND opens / closes every
+// overlay's SSE connection so we don't burn TCP slots when nobody's
+// looking. The CSS-driven visibility plus lazy SSE keeps the toggle
+// feeling instant — the first detection batch arrives within ~1s of
+// flipping it on.
 function wireLabelsToggle() {
   const btn = document.getElementById("labels-toggle");
   if (!btn) return;
@@ -138,12 +168,14 @@ function wireLabelsToggle() {
   document.body.classList.toggle("labels-on", initial);
   btn.setAttribute("aria-pressed", String(initial));
   btn.classList.toggle("active", initial);
+  setAllOverlays(initial);
   btn.addEventListener("click", () => {
     const on = !document.body.classList.contains("labels-on");
     document.body.classList.toggle("labels-on", on);
     btn.setAttribute("aria-pressed", String(on));
     btn.classList.toggle("active", on);
     localStorage.setItem("belfry-labels", on ? "on" : "off");
+    setAllOverlays(on);
   });
 }
 
