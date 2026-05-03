@@ -1,4 +1,4 @@
-# homecam
+# belfry
 
 Self-hosted DVR for Interlogix TVB-5301 cameras (OEM Hikvision) on a dedicated, isolated camera subnet. The on-prem Jetson Orin pulls RTSP from each camera, MediaMTX repackages to HLS for live viewing and writes 1-hour fMP4 segments to disk for recording, and a small FastAPI service serves a per-set browser viewer plus a per-camera scrubback page. nginx fronts everything on port 80 for LAN access. A small EC2 frontdoor (Caddy + oauth2-proxy) terminates HTTPS for `yellowchicken.io`, gates every request behind Google OAuth, and reverse-proxies through a persistent SSH tunnel back to the Orin — so all video and recordings stay on the Orin while the public side enforces auth.
 
@@ -14,10 +14,10 @@ Self-hosted DVR for Interlogix TVB-5301 cameras (OEM Hikvision) on a dedicated, 
 - `cameras.yaml` — source of truth for camera grouping (sets), credentials, recording path, retention watermarks. Gitignored, mode 0600. Template: `cameras.example.yaml`.
 - `recordings/` — gitignored, on the 3.6 TB NVMe (`/dev/nvme0n1p1`). One subdir per camera (`recordings/cam5/...`). MediaMTX writes 1-hour fMP4 segments here.
 - `playback_cache/` — gitignored sibling of `recordings/`. FastAPI buffers each MediaMTX `/get` response here so byte-range requests work (iOS Safari requires it for `<video>`); LRU-evicted at a 2 GiB cap.
-- `scripts/run.sh` — starts MediaMTX + uvicorn together; cleans up on Ctrl-C. Invoked by the `homecam` systemd unit at `/etc/systemd/system/homecam.service`.
+- `scripts/run.sh` — starts MediaMTX + uvicorn together; cleans up on Ctrl-C. Invoked by the `belfry` systemd unit at `/etc/systemd/system/belfry.service`.
 - `scripts/install-mediamtx.sh` — fetches the MediaMTX binary for the host arch.
-- `scripts/nginx-homecam.conf` — tracked copy of the Orin's nginx site (`/etc/nginx/sites-available/homecam`).
-- `scripts/homecam-tunnel.service` — autossh systemd unit; opens the reverse SSH tunnel from Orin to EC2 (Caddy upstream + admin SSH back-in).
+- `scripts/nginx-belfry.conf` — tracked copy of the Orin's nginx site (`/etc/nginx/sites-available/belfry`).
+- `scripts/belfry-tunnel.service` — autossh systemd unit; opens the reverse SSH tunnel from Orin to EC2 (Caddy upstream + admin SSH back-in).
 - `cloud/` — EC2 frontdoor: `Caddyfile`, `oauth2-proxy.cfg`, systemd units, and `install-ec2.sh` bootstrap script. Run on EC2 only.
 - `runme.sh` — gitignored throwaway shell script. Convention: when something needs sudo, write the steps here for the user to run from their own terminal.
 
@@ -33,7 +33,7 @@ The MediaMTX `playback` (`:9996`) and `api` (`:9997`) endpoints are loopback-onl
 
 ## nginx
 
-`/etc/nginx/sites-available/homecam` listens on `:80` and proxies:
+`/etc/nginx/sites-available/belfry` listens on `:80` and proxies:
 
 - `/hls/` → `127.0.0.1:8888` (MediaMTX HLS), with `proxy_redirect ~^/(.*)$ /hls/$1` to rewrite MediaMTX's bare-path 302 Locations so the cookie-check redirect stays inside `/hls/`.
 - `/playback/` → `127.0.0.1:9996` (MediaMTX playback API), same redirect-rewrite trick.
@@ -48,7 +48,7 @@ The MediaMTX `playback` (`:9996`) and `api` (`:9997`) endpoints are loopback-onl
 - **Caddy** (`/etc/caddy/Caddyfile`, systemd unit `caddy.service`) — listens on `:443`, auto-issues Let's Encrypt certs. `forward_auth 127.0.0.1:4180` (oauth2-proxy's `/oauth2/auth`) lives inside the catch-all `handle` block (not at the site-block top level) because Caddy's default directive order runs `handle` before `forward_auth`; at the top level the catch-all handle would terminate the request before the gate ever ran. Inside `forward_auth`, a `handle_response @bad-status` block intercepts oauth2-proxy's 401 and `redir * /oauth2/start?rd={uri} 302` redirects the browser into the Google login flow — note the explicit `*` matcher: `redir [<matcher>] <to> [<code>]` treats a leading-`/` first arg as an implicit path matcher, so without `*` the URL gets parsed as a never-matching matcher and the gate silently fails open. Authenticated requests reverse-proxy to `127.0.0.1:8080` (the tunnel).
 - **oauth2-proxy** (`/etc/oauth2-proxy/oauth2-proxy.cfg`, systemd unit `oauth2-proxy.service`) — bound `127.0.0.1:4180`, Google provider. Allow-listed emails live in `/etc/oauth2-proxy/emails`. Secrets (client_id/secret, cookie_secret) in `/etc/oauth2-proxy/oauth2-proxy.env`, read by the systemd unit's `EnvironmentFile=`.
 
-The reverse SSH tunnel runs on the **Orin**, outbound to EC2 (autossh, `homecam-tunnel.service`). Two `-R` forwards land on EC2's loopback (`GatewayPorts no` keeps them off the public interface):
+The reverse SSH tunnel runs on the **Orin**, outbound to EC2 (autossh, `belfry-tunnel.service`). Two `-R` forwards land on EC2's loopback (`GatewayPorts no` keeps them off the public interface):
 
 - `127.0.0.1:8080` → Orin `:80` — the upstream Caddy reverse-proxies into.
 - `127.0.0.1:2222` → Orin `:22` — `ssh -J paulm@yellowchicken.io paulm@127.0.0.1 -p 2222` from a laptop while travelling.
@@ -65,7 +65,7 @@ cameras.yaml groups cameras into named **sets** (e.g. `set1`, `set2`). The DVR h
 
 - 24/7 recording. Each camera writes 1-hour fMP4 segments (`recordSegmentDuration: 1h`, `recordPartDuration: 1s`).
 - Disk-aware retention runs as a FastAPI lifespan task (`dvr/retention.py`). Every `scan_interval_s` (default 60s) it `shutil.disk_usage`s the recordings volume; if usage > `evict_high_pct` (default 85), it deletes oldest mp4 files globally until usage < `evict_low_pct` (default 80). Files modified within the last 70 minutes are protected so MediaMTX never has its in-progress segment yanked. Per-camera dirs share the disk fairly under "oldest-globally" because all 8 cams record at similar bitrate.
-- Status visible at `GET /api/retention/status`. Eviction events log to journald under `homecam`.
+- Status visible at `GET /api/retention/status`. Eviction events log to journald under `belfry`.
 
 ## Scrubback UI
 
@@ -92,7 +92,7 @@ Remaining (see `~/.claude/plans/we-have-this-dvr-resilient-lighthouse.md` for th
 
 ## Operational
 
-- systemd on the Orin: `homecam.service`, `homecam-tunnel.service`, and `nginx.service` are all `enabled` at boot. `homecam` and `homecam-tunnel` `Restart=on-failure` / `Restart=always` so crashes and tunnel drops recover automatically. Logs: `journalctl -u homecam` / `journalctl -u homecam-tunnel`.
+- systemd on the Orin: `belfry.service`, `belfry-tunnel.service`, and `nginx.service` are all `enabled` at boot. `belfry` and `belfry-tunnel` `Restart=on-failure` / `Restart=always` so crashes and tunnel drops recover automatically. Logs: `journalctl -u belfry` / `journalctl -u belfry-tunnel`.
 - systemd on EC2: `caddy.service` and `oauth2-proxy.service`. Logs: `journalctl -u caddy` / `journalctl -u oauth2-proxy`.
 - Orin: NVIDIA Jetson Orin (aarch64), Ubuntu 22.04. NVIDIA GPU/NPU available but unused until Phase 4.
 - EC2: Amazon Linux 2023 x86_64, us-west-2, paulm user, EIP attached to `yellowchicken.io`.

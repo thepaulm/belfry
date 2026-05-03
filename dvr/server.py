@@ -35,7 +35,7 @@ async def _lifespan(_: FastAPI):
         await retention_loop.stop()
 
 
-app = FastAPI(title="homecam-dvr", lifespan=_lifespan)
+app = FastAPI(title="belfry-dvr", lifespan=_lifespan)
 
 
 def _camera_payload(c: Camera) -> dict:

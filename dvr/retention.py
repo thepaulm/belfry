@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .config import Recording, Retention
 
-logger = logging.getLogger("homecam.retention")
+logger = logging.getLogger("belfry.retention")
 
 # Files modified within this many seconds are not eligible for eviction;
 # MediaMTX may still be writing to them. Must be larger than the

@@ -1,5 +1,5 @@
 [Unit]
-Description=homecam reverse SSH tunnel to EC2
+Description=belfry reverse SSH tunnel to EC2
 After=network-online.target
 Wants=network-online.target
 
