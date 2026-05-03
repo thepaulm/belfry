@@ -442,14 +442,16 @@ function loadWindow() {
 
   // Past-mode bounding-box overlay: only re-subscribe when the active
   // window actually changes (loadWindow can fire repeatedly during a
-  // single window — e.g. the 5s tick that bumps scrubber.max). The
-  // overlay's SSE only opens when "Show labels" is on, so the
-  // subscribePast call is cheap when labels are off.
+  // single window — e.g. the 5s tick that bumps scrubber.max).
+  // subscribePast unconditionally — it sets the overlay's mode/URL
+  // and only opens the EventSource if "Show labels" is currently on.
+  // We need the mode flip even when labels are off so that toggling
+  // them on later opens the past SSE rather than defaulting to live.
   const newWindowStart = target.getTime() / 1000;
   if (newWindowStart !== pastWindowStartUnix) {
     pastWindowStartUnix = newWindowStart;
     const overlay = ensureOverlay();
-    if (overlay && document.body.classList.contains("labels-on")) {
+    if (overlay) {
       overlay.subscribePast({
         url: `/api/inference/playback?cam=${encodeURIComponent(CAM)}`
           + `&start=${encodeURIComponent(isoStart)}`
