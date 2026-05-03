@@ -16,7 +16,12 @@ cd "$(dirname "$0")/.."
 
 VENV=".venv-inference"
 PYTHON="/usr/bin/python3.10"
-JETSON_INDEX="https://pypi.jetson-ai-lab.dev/jp6/cu126"
+# devpi mirror that publishes Jetson-specific torch wheels and PROXIES
+# the rest of PyPI under the same URL. We point pip's --index-url at it
+# so the cpython upstream torch wheels (which carry a +cu130 local tag
+# that sorts higher than the Jetson plain build) don't shadow the
+# Jetson-built torch. The .dev domain alias does not resolve; use .io.
+JETSON_INDEX="https://pypi.jetson-ai-lab.io/jp6/cu126"
 
 if [[ ! -x "$PYTHON" ]]; then
     echo "$PYTHON not found — Jetson torch wheels need Python 3.10" >&2
@@ -41,9 +46,18 @@ source "$VENV/bin/activate"
 pip install --upgrade pip wheel >/dev/null
 
 # --- jetson torch -------------------------------------------------------
-if ! python -c "import torch" 2>/dev/null; then
-    echo "==> installing Jetson PyTorch (this can take a few minutes)"
-    pip install --extra-index-url "$JETSON_INDEX" torch torchvision
+# Reinstall if torch is missing OR if it's installed but CUDA can't
+# initialize — the latter happens when pip pulled the upstream cu130
+# wheel from PyPI instead of the Jetson cu126 build. The check exits
+# 0 only when torch.cuda is fully functional.
+torch_ok=0
+if python -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
+    torch_ok=1
+fi
+if [[ "$torch_ok" == "0" ]]; then
+    echo "==> installing Jetson PyTorch from $JETSON_INDEX (a few minutes)"
+    pip uninstall -y torch torchvision 2>/dev/null || true
+    pip install --index-url "$JETSON_INDEX" torch torchvision
 fi
 
 python -c "
@@ -52,12 +66,14 @@ print('torch :', torch.__version__)
 print('cuda  :', torch.cuda.is_available())
 if torch.cuda.is_available():
     print('device:', torch.cuda.get_device_name(0))
+else:
+    raise SystemExit('torch installed but cuda init failed; aborting')
 "
 
 # --- ultralytics + cv2 --------------------------------------------------
 if ! python -c "import ultralytics" 2>/dev/null; then
     echo "==> installing ultralytics + opencv-python + pyyaml"
-    pip install ultralytics opencv-python numpy pyyaml
+    pip install --index-url "$JETSON_INDEX" ultralytics opencv-python numpy pyyaml
 fi
 
 # --- weights ------------------------------------------------------------
