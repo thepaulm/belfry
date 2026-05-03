@@ -322,6 +322,26 @@ function onScrub() {
   scrubDebounce = setTimeout(loadWindow, 250);
 }
 
+function seekToTimestamp(ts) {
+  // Move the day picker to ts's local day, then put the scrubber at
+  // (ts - dayStart) seconds and call loadWindow(). Used when the page
+  // is opened with ?ts=<unix epoch>, e.g. via a deep-link from /events.
+  const target = new Date(ts * 1000);
+  const dayMs = startOfLocalDay(target).getTime();
+  if (![...dayPicker.options].some(o => parseInt(o.value, 10) === dayMs)) {
+    // ts predates the day picker's range — fall back to live.
+    goLive();
+    return;
+  }
+  dayPicker.value = String(dayMs);
+  applyScrubberMax();
+  renderTicks();
+  renderAvailabilityBar();
+  const offset = Math.max(0, Math.floor(ts - dayMs / 1000));
+  scrubber.value = String(Math.min(offset, parseInt(scrubber.max, 10)));
+  loadWindow();
+}
+
 function init() {
   if (!SET_ID || !CAM) {
     statusPill.textContent = "bad URL";
@@ -373,10 +393,16 @@ function init() {
   updateCursor();
   updateGoLiveBtn();
   refreshAvailability();
-  // Default to live on page load — opening playback with the slider parked at
-  // 00:00 and nothing playing isn't useful; the user almost always wants
-  // "what's happening now" until they scrub back.
-  goLive();
+  // Honor ?ts=<unix epoch> deep-links from /events. Default to live
+  // when not present — opening playback with the slider parked at
+  // 00:00 and nothing playing isn't useful; the user almost always
+  // wants "what's happening now" until they scrub back.
+  const tsParam = parseFloat(new URLSearchParams(window.location.search).get("ts"));
+  if (Number.isFinite(tsParam) && tsParam > 0) {
+    seekToTimestamp(tsParam);
+  } else {
+    goLive();
+  }
 }
 
 init();

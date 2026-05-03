@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
+import sqlite3
 import uuid
 from hashlib import sha1
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, RedirectResponse
 
 from .config import Camera, CameraSet, load_config
@@ -80,6 +82,178 @@ async def api_set_health(set_id: str) -> list[dict]:
 @app.get("/api/retention/status")
 async def api_retention_status() -> dict:
     return retention_loop.status_dict()
+
+
+# --- inference events --------------------------------------------------
+# Read-only views over the events DB written by inference/recorder.py.
+# Schema: events(id, camera, class, ts_start, ts_end, max_conf,
+# peak_bbox JSON, thumb_path, sample_count). The DB is on the same
+# disk as the recordings; queries run against a per-request sqlite3
+# connection (cheap on a local file in WAL mode). The block is no-op
+# if the events DB hasn't been created yet (no inference runs ever).
+
+_CAMERA_TO_SET: dict[str, str] = {
+    cam.name: s.id for s in config.sets for cam in s.cameras
+}
+
+
+def _open_events_db() -> sqlite3.Connection | None:
+    p = config.inference.db_path
+    if not p.exists():
+        return None
+    # Read-only URI mode so a stray write would fail loudly. Multi-thread
+    # safe = False here is OK because the connection is request-local.
+    conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _event_row_to_dict(r: sqlite3.Row) -> dict:
+    try:
+        peak_bbox = json.loads(r["peak_bbox"])
+    except (json.JSONDecodeError, TypeError):
+        peak_bbox = None
+    return {
+        "id": r["id"],
+        "camera": r["camera"],
+        "set_id": _CAMERA_TO_SET.get(r["camera"]),
+        "class": r["class"],
+        "ts_start": r["ts_start"],
+        "ts_end": r["ts_end"],
+        "duration_s": round(r["ts_end"] - r["ts_start"], 2),
+        "max_conf": round(r["max_conf"], 3),
+        "peak_bbox": peak_bbox,
+        "sample_count": r["sample_count"],
+        "thumb_url": f"/api/events/thumb/{r['id']}" if r["thumb_path"] else None,
+    }
+
+
+def _query_events(
+    cam: str | None = None,
+    cls: str | None = None,
+    since: float | None = None,
+    until: float | None = None,
+    before_id: int | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    """SQL-builder shared by /api/events and /api/events/recent.
+    Pure-Python defaults so it can be called directly from other
+    handlers without dragging in Query() sentinel values."""
+    conn = _open_events_db()
+    if conn is None:
+        return []
+    where = []
+    args: list = []
+    if cam is not None:
+        where.append("camera = ?")
+        args.append(cam)
+    if cls is not None:
+        where.append("class = ?")
+        args.append(cls)
+    if since is not None:
+        where.append("ts_end >= ?")
+        args.append(since)
+    if until is not None:
+        where.append("ts_start <= ?")
+        args.append(until)
+    if before_id is not None:
+        where.append("id < ?")
+        args.append(before_id)
+    sql = "SELECT * FROM events"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(limit)
+    try:
+        rows = conn.execute(sql, args).fetchall()
+    finally:
+        conn.close()
+    return [_event_row_to_dict(r) for r in rows]
+
+
+@app.get("/api/events")
+async def api_events(
+    cam: str | None = None,
+    cls: str | None = Query(default=None, alias="class"),
+    since: float | None = None,
+    until: float | None = None,
+    before_id: int | None = Query(default=None, description="Cursor: return events with id < before_id"),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[dict]:
+    """Filtered events list, newest first.
+
+    Cursor-paginate by passing the smallest `id` from the previous page
+    as `before_id`. Combine with `since`/`until` for time windows;
+    omitted bounds are open-ended.
+    """
+    return _query_events(
+        cam=cam, cls=cls, since=since, until=until,
+        before_id=before_id, limit=limit,
+    )
+
+
+@app.get("/api/events/recent")
+async def api_events_recent(
+    cam: str | None = None,
+    limit: int = Query(default=10, ge=1, le=50),
+) -> list[dict]:
+    """Most-recent events; thin convenience wrapper used by live tile
+    badges in slice 5."""
+    return _query_events(cam=cam, limit=limit)
+
+
+@app.get("/api/events/neighbors")
+async def api_events_neighbors(cam: str, ts: float) -> dict:
+    """{prev, next} event timestamps around a cursor — backs the prev/
+    next-event buttons coming in slice 4."""
+    conn = _open_events_db()
+    if conn is None:
+        return {"prev": None, "next": None}
+    try:
+        prev = conn.execute(
+            "SELECT id, ts_start FROM events WHERE camera = ? AND ts_start < ? "
+            "ORDER BY ts_start DESC LIMIT 1",
+            (cam, ts),
+        ).fetchone()
+        nxt = conn.execute(
+            "SELECT id, ts_start FROM events WHERE camera = ? AND ts_start > ? "
+            "ORDER BY ts_start ASC LIMIT 1",
+            (cam, ts),
+        ).fetchone()
+    finally:
+        conn.close()
+    return {
+        "prev": {"id": prev["id"], "ts_start": prev["ts_start"]} if prev else None,
+        "next": {"id": nxt["id"], "ts_start": nxt["ts_start"]} if nxt else None,
+    }
+
+
+@app.get("/api/events/thumb/{event_id}")
+async def api_events_thumb(event_id: int) -> FileResponse:
+    """Serve the peak-conf JPEG for one event. Long cache because
+    thumbnails are immutable (the recorder never rewrites a row)."""
+    conn = _open_events_db()
+    if conn is None:
+        raise HTTPException(status_code=404, detail="events DB not present")
+    try:
+        row = conn.execute(
+            "SELECT thumb_path FROM events WHERE id = ?", (event_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None or not row["thumb_path"]:
+        raise HTTPException(status_code=404, detail=f"no thumbnail for event {event_id}")
+    abs_path = (config.inference.thumbs_dir / row["thumb_path"]).resolve()
+    # Defense in depth: refuse if the resolved path escapes the thumbs root.
+    if config.inference.thumbs_dir.resolve() not in abs_path.parents:
+        raise HTTPException(status_code=404)
+    if not abs_path.is_file():
+        raise HTTPException(status_code=404, detail=f"thumbnail file gone: {row['thumb_path']}")
+    return FileResponse(
+        abs_path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 _MEDIAMTX_PLAYBACK = "http://127.0.0.1:9996"
@@ -209,6 +383,13 @@ async def view_playback(set_id: str, cam: str) -> FileResponse:
     if cam not in {c.name for c in s.cameras}:
         raise HTTPException(status_code=404, detail=f"camera {cam!r} not in set {set_id!r}")
     return FileResponse(STATIC_DIR / "playback.html")
+
+
+@app.get("/events")
+async def view_events() -> FileResponse:
+    """Cross-camera events browse page (served regardless of whether
+    the events DB exists yet — page handles the empty state)."""
+    return FileResponse(STATIC_DIR / "events.html")
 
 
 @app.get("/static/{path:path}")

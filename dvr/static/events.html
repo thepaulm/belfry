@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>belfry · events</title>
+  <link rel="stylesheet" href="/static/viewer.css?v=16">
+  <script defer src="/static/events.js?v=1"></script>
+</head>
+<body class="events-body">
+  <header>
+    <h1>belfry</h1>
+    <nav id="set-nav">
+      <a id="back-to-set" href="/">&larr; All cameras</a>
+    </nav>
+    <span id="status" class="status-pill"></span>
+  </header>
+
+  <div class="events-filters">
+    <div class="filter-row">
+      <span class="filter-label">Class</span>
+      <div id="class-chips" class="chip-row"></div>
+    </div>
+    <div class="filter-row">
+      <span class="filter-label">Camera</span>
+      <div id="cam-chips" class="chip-row"></div>
+    </div>
+    <div class="filter-row">
+      <span class="filter-label">Window</span>
+      <div id="window-chips" class="chip-row">
+        <button class="chip" data-window="24h">Last 24h</button>
+        <button class="chip" data-window="today">Today</button>
+        <button class="chip" data-window="7d">Last 7d</button>
+        <button class="chip" data-window="all">All</button>
+      </div>
+    </div>
+  </div>
+
+  <main id="events-grid"></main>
+
+  <div id="events-footer">
+    <button id="load-more" type="button" hidden>Load more</button>
+    <span id="empty-msg" class="muted" hidden>No events match the current filters.</span>
+  </div>
+
+  <template id="event-card-template">
+    <a class="event-card" href="#">
+      <div class="event-thumb-wrap">
+        <img class="event-thumb" loading="lazy" alt="">
+        <span class="event-class-badge"></span>
+        <span class="event-conf-badge"></span>
+      </div>
+      <div class="event-meta">
+        <span class="event-cam"></span>
+        <span class="event-time"></span>
+        <span class="event-dur muted"></span>
+      </div>
+    </a>
+  </template>
+</body>
+</html>
