@@ -42,7 +42,10 @@ let liveOverlay = null;
 // three buckets: (1) keeps the legend short (person / animal / vehicle),
 // (2) the COCO subclasses dog / cat / bird don't add visual signal at
 // pip-width — a single green is enough.
-const CLASS_COLOR = {
+// Renamed from CLASS_COLOR to dodge a clash with overlay.js (both run
+// in classic-script global scope — duplicate `const` is a SyntaxError
+// that aborts the whole file).
+const PIP_COLOR = {
   person:  "#4ea1ff",
   animal:  "#5ad17c",
   dog:     "#5ad17c",
@@ -52,10 +55,10 @@ const CLASS_COLOR = {
   car:     "#ff9b3f",
   truck:   "#ff9b3f",
 };
-const CLASS_COLOR_DEFAULT = "#aaa";
+const PIP_COLOR_DEFAULT = "#aaa";
 
-function classColor(cls) {
-  return CLASS_COLOR[cls] || CLASS_COLOR_DEFAULT;
+function pipColor(cls) {
+  return PIP_COLOR[cls] || PIP_COLOR_DEFAULT;
 }
 
 // Start of the local day (00:00:00 local). The user thinks in local time;
@@ -187,7 +190,7 @@ function renderEventPips() {
     // Floor the rendered width at a tiny minimum so a 0-second event
     // (sample_count=1) is still visible as a hairline mark.
     pip.style.width = `${Math.max(widthPct, 0.15)}%`;
-    pip.style.background = classColor(ev.class);
+    pip.style.background = pipColor(ev.class);
     pip.dataset.ts = String(ev.ts_start);
     pip.title = `${ev.class} · ${new Date(ev.ts_start * 1000).toLocaleTimeString()}`
       + ` · conf ${ev.max_conf.toFixed(2)}`;
@@ -218,7 +221,7 @@ function renderEventLegend() {
     if (!buckets.has(name)) continue;
     const dot = document.createElement("span");
     dot.className = "legend-dot";
-    dot.style.background = classColor(name);
+    dot.style.background = pipColor(name);
     eventLegendEl.appendChild(dot);
     const lbl = document.createElement("span");
     lbl.className = "legend-label";
@@ -358,10 +361,15 @@ function enterLiveMode() {
 
   const hlsUrl = `/hls/${encodeURIComponent(CAM)}/index.m3u8`;
   tearDownLive();
-  // (BoxOverlay deliberately not attached on the playback page right
-  // now — turning it on broke playback in a way I haven't reproduced
-  // yet. Live tiles on the index page still get the overlay. The
-  // pre-overlay layout is restored here so video plays reliably.)
+  // Live bounding-box overlay only attaches in live mode — past mp4
+  // segments don't have a live SSE feed (deferring overlays for past
+  // playback to a future slice). SSE inside BoxOverlay is lazy and
+  // only opens when "Show labels" is toggled on, so the overlay
+  // attach is cheap when labels are off.
+  if (window.BoxOverlay) {
+    const wrap = document.querySelector(".playback-video-wrap");
+    if (wrap) liveOverlay = new BoxOverlay(wrap, CAM);
+  }
   if (player.canPlayType("application/vnd.apple.mpegurl")) {
     player.pause();
     player.src = hlsUrl;
