@@ -13,6 +13,7 @@ class Camera:
     label: str
     rtsp: str
     enabled: bool
+    inference: bool = False
 
     def hls_url(self, base: str) -> str:
         return f"{base.rstrip('/')}/{self.name}/index.m3u8"
@@ -48,11 +49,44 @@ class Retention:
 
 
 @dataclass(frozen=True)
+class Inference:
+    # Model files. Resolved relative to project root if not absolute.
+    # `.engine` (TensorRT) preferred for speed; falls back to `.pt` (PyTorch
+    # CUDA) when the engine doesn't exist on disk yet.
+    megadetector_pt: Path
+    megadetector_engine: Path
+    yolo_pt: Path
+    yolo_engine: Path
+    # Effective day-1 active classes after the IoU merge between MegaDetector
+    # ({person, animal, vehicle}) and YOLO11 COCO ({person, dog, cat, bird,
+    # car, truck}). Anything not in this set is dropped at write time.
+    event_classes: tuple[str, ...]
+    # Single default confidence threshold; per-class overrides win when the
+    # class key is present.
+    conf_threshold: float
+    class_thresholds: dict[str, float]
+    # IoU above which a MegaDetector det and a YOLO det are considered the
+    # same object — the more specific COCO label then wins.
+    merge_iou: float
+    # Coalescing window: same (camera, class) detections within this many
+    # seconds extend a single event row instead of opening a new one.
+    cooldown_s: int
+    # Frame-rate caps for the two consumers of the GPU worker.
+    record_fps: int   # always-on event detector
+    live_fps: int     # on-demand viewer overlay (slice 5)
+    # Where event thumbnails get written.
+    thumbs_dir: Path
+    # SQLite events DB.
+    db_path: Path
+
+
+@dataclass(frozen=True)
 class Config:
     hls_base: str
     sets: tuple[CameraSet, ...]
     recording: Recording
     retention: Retention
+    inference: Inference
 
     def get_set(self, id: str) -> CameraSet | None:
         return next((s for s in self.sets if s.id == id), None)
@@ -79,6 +113,49 @@ def _load_retention(raw: dict) -> Retention:
     )
 
 
+def _resolve(p: str | Path, project_root: Path) -> Path:
+    path = Path(p)
+    return path if path.is_absolute() else (project_root / path).resolve()
+
+
+def _load_inference(raw: dict, project_root: Path, recording: Recording) -> Inference:
+    block = raw.get("inference") or {}
+    classes = tuple(
+        block.get(
+            "event_classes",
+            ["person", "dog", "cat", "bird", "car", "truck", "animal"],
+        )
+    )
+    return Inference(
+        megadetector_pt=_resolve(
+            block.get("megadetector_pt", "inference/megadetector.pt"), project_root
+        ),
+        megadetector_engine=_resolve(
+            block.get("megadetector_engine", "inference/megadetector.engine"),
+            project_root,
+        ),
+        yolo_pt=_resolve(
+            block.get("yolo_pt", "inference/yolo11n.pt"), project_root
+        ),
+        yolo_engine=_resolve(
+            block.get("yolo_engine", "inference/yolo11n.engine"), project_root
+        ),
+        event_classes=classes,
+        conf_threshold=float(block.get("conf_threshold", 0.40)),
+        class_thresholds={k: float(v) for k, v in (block.get("class_thresholds") or {}).items()},
+        merge_iou=float(block.get("merge_iou", 0.5)),
+        cooldown_s=int(block.get("cooldown_s", 10)),
+        record_fps=int(block.get("record_fps", 1)),
+        live_fps=int(block.get("live_fps", 5)),
+        thumbs_dir=_resolve(
+            block.get("thumbs_dir", recording.path / "thumbs"), project_root
+        ),
+        db_path=_resolve(
+            block.get("db_path", recording.path / "events.db"), project_root
+        ),
+    )
+
+
 def load_config(path: Path | str = "cameras.yaml") -> Config:
     cfg_path = Path(path)
     raw = yaml.safe_load(cfg_path.read_text())
@@ -94,6 +171,7 @@ def load_config(path: Path | str = "cameras.yaml") -> Config:
                     label=c.get("label", c["name"]),
                     rtsp=c["rtsp"],
                     enabled=bool(c.get("enabled", True)),
+                    inference=bool(c.get("inference", False)),
                 )
                 for c in (s.get("cameras") or [])
             ),
@@ -118,9 +196,11 @@ def load_config(path: Path | str = "cameras.yaml") -> Config:
             f"< high ({retention.evict_high_pct}) < 100"
         )
 
+    recording = _load_recording(raw, project_root)
     return Config(
         hls_base=raw["hls_base"],
         sets=sets,
-        recording=_load_recording(raw, project_root),
+        recording=recording,
         retention=retention,
+        inference=_load_inference(raw, project_root, recording),
     )

@@ -21,6 +21,29 @@ retention:
   evict_low_pct: 80
   scan_interval_s: 60
 
+# Phase 4 inference defaults. Per-camera enable lives on each camera below
+# (`inference: true`). Model files default under inference/; the install
+# script downloads them. Per-class thresholds override the default for
+# noisy classes (e.g. raise `person` to suppress door-blowing-in false
+# positives, lower `bird` to catch partial-frame detections).
+inference:
+  conf_threshold: 0.40
+  class_thresholds:
+    # person: 0.45
+    # bird:   0.30
+  cooldown_s: 10            # gap that closes an event run
+  record_fps: 1             # always-on recorder per cam
+  live_fps: 5               # on-demand viewer overlay (slice 5)
+  merge_iou: 0.5            # MegaDetector ↔ YOLO11 box overlap threshold
+  event_classes:
+    - person
+    - dog
+    - cat
+    - bird
+    - car
+    - truck
+    - animal                # MegaDetector bucket: deer, raccoon, coyote, …
+
 sets:
   - id: set1
     label: Set 1
@@ -28,6 +51,7 @@ sets:
       - name: cam6
         label: Backyard
         enabled: true
+        inference: true     # opt-in per camera; default false
         rtsp: rtsp://admin:CHANGEME@192.168.1.10:8554/Streaming/Channels/101
 
   - id: set2

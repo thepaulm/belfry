@@ -1,7 +1,14 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv-inference/
 .env
+
+# Inference model artifacts — weights are downloaded by the install
+# script; TensorRT engines are device-specific so each Orin builds its
+# own. None of this belongs in git.
+inference/*.pt
+inference/*.engine
 cameras.yaml
 mediamtx/mediamtx
 mediamtx/mediamtx.yml
