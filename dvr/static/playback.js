@@ -26,6 +26,12 @@ const backLink = document.getElementById("back-to-set");
 const goLiveBtn = document.getElementById("go-live");
 const prevEventBtn = document.getElementById("prev-event");
 const nextEventBtn = document.getElementById("next-event");
+const scaleDayBtn = document.getElementById("scale-day");
+const scaleHourBtn = document.getElementById("scale-hour");
+const scale5MinBtn = document.getElementById("scale-5min");
+const prevSliceBtn = document.getElementById("prev-slice");
+const nextSliceBtn = document.getElementById("next-slice");
+const sliceLabel = document.getElementById("slice-label");
 
 if (SET_ID && CAM) {
   backLink.href = `/sets/${encodeURIComponent(SET_ID)}`;
@@ -33,9 +39,15 @@ if (SET_ID && CAM) {
 
 let availableRanges = [];
 let dayEvents = [];          // events with ts_start inside the selected day
-let scrubDebounce = null;
 let mode = "past"; // "past" | "live"
 let liveHls = null;
+// Slider visible-window scale. Day shows the full 24h (or up to "now"
+// for today); Hour zooms the slider to a single hour for finer
+// scrubbing; 5min zooms to a single 5-minute slot. Prev/Next-slice
+// buttons step the visible window by viewSpanSec().
+const SCALE_SPAN = { day: 86400, hour: 3600, "5min": 300 };
+let viewScale = "day";
+let viewStartSec = 0;        // sec-of-day where the visible window starts
 // Single BoxOverlay that lives across mode transitions. When entering
 // live mode we hook it to the SSE feed; when entering past mode (or
 // scrubbing into a different 5-min window) we re-bind it to the new
@@ -182,16 +194,19 @@ async function refreshDayEvents() {
 
 function renderEventPips() {
   eventPipsEl.innerHTML = "";
+  const minVal = scrubMinSec();
   const max = scrubMaxSec();
+  const range = max - minVal || 1;
   const dayStart = selectedDayStart();
+  const dayStartUnix = dayStart.getTime() / 1000;
   for (const ev of dayEvents) {
-    // Position the pip at ts_start; stretch to ts_end so longer events
-    // (someone lingering for 30s) get a proportionally wider mark.
-    const startSec = (ev.ts_start - dayStart.getTime() / 1000);
-    const endSec = (ev.ts_end - dayStart.getTime() / 1000);
-    if (endSec < 0 || startSec > max) continue;
-    const left = (Math.max(0, startSec) / max) * 100;
-    const widthPct = ((Math.min(endSec, max) - Math.max(0, startSec)) / max) * 100;
+    const startSec = ev.ts_start - dayStartUnix;
+    const endSec = ev.ts_end - dayStartUnix;
+    if (endSec < minVal || startSec > max) continue;
+    const clampedStart = Math.max(startSec, minVal);
+    const clampedEnd = Math.min(endSec, max);
+    const left = ((clampedStart - minVal) / range) * 100;
+    const widthPct = ((clampedEnd - clampedStart) / range) * 100;
     const pip = document.createElement("span");
     pip.className = "event-pip";
     pip.style.left = `${left}%`;
@@ -283,15 +298,44 @@ function liveEdgeOfSelectedDay() {
   return Math.floor((now - startOfLocalDay(now)) / 1000);
 }
 
-function applyScrubberMax() {
-  // On today, clamp to "now" so the user can't drag past the live edge.
-  // On other days, the full 24h is available.
+function viewSpanSec() {
+  return SCALE_SPAN[viewScale];
+}
+
+function snapToScale(sec) {
+  const span = viewSpanSec();
+  return Math.floor(Math.max(0, sec) / span) * span;
+}
+
+function recomputeViewStart(anchor) {
+  // Snap viewStartSec to contain `anchor` (sec-of-day). Anchor defaults
+  // to the current scrubber value so that switching scales preserves
+  // "where the user was looking."
+  const cur = (anchor != null ? anchor : parseInt(scrubber.value, 10)) || 0;
   const live = liveEdgeOfSelectedDay();
-  scrubber.max = String(live !== null ? live : 86399);
-  if (parseInt(scrubber.value, 10) > parseInt(scrubber.max, 10)) {
-    scrubber.value = scrubber.max;
-  }
+  const dayMax = live !== null ? live : 86399;
+  const clamped = Math.max(0, Math.min(cur, dayMax));
+  viewStartSec = snapToScale(clamped);
+}
+
+function applyScrubberMax() {
+  // The slider's range is the visible window: [viewStartSec, viewStartSec+span-1],
+  // capped on today by the live edge. On other days, capped at end-of-day.
+  const span = viewSpanSec();
+  const live = liveEdgeOfSelectedDay();
+  const dayMax = live !== null ? live : 86399;
+  const minVal = Math.max(0, Math.min(viewStartSec, dayMax));
+  const maxVal = Math.max(minVal, Math.min(viewStartSec + span - 1, dayMax));
+  scrubber.min = String(minVal);
+  scrubber.max = String(maxVal);
+  const cur = parseInt(scrubber.value, 10);
+  if (cur < minVal) scrubber.value = String(minVal);
+  else if (cur > maxVal) scrubber.value = String(maxVal);
   updateCursor();
+}
+
+function scrubMinSec() {
+  return parseInt(scrubber.min, 10) || 0;
 }
 
 function scrubMaxSec() {
@@ -300,23 +344,26 @@ function scrubMaxSec() {
 
 function renderAvailabilityBar() {
   availability.innerHTML = "";
-  // The scrubber and the availability bar must share a denominator so the
-  // blue blocks line up with the cursor. On today, scrubber.max is clamped
-  // to "now" (e.g. 40 min into the day), so a 30-min recording covers most
-  // of the timeline rather than appearing as a 2% sliver.
+  // The scrubber and the availability bar share a denominator so the blue
+  // blocks line up with the cursor. The visible window is
+  // [scrubber.min, scrubber.max] sec-of-day; ranges outside it are skipped,
+  // ranges that straddle it are clamped.
+  const minVal = scrubMinSec();
   const max = scrubMaxSec();
+  const range = max - minVal || 1;
   const dayStart = selectedDayStart();
-  const visibleEnd = new Date(dayStart.getTime() + max * 1000);
+  const visibleStartMs = dayStart.getTime() + minVal * 1000;
+  const visibleEndMs = dayStart.getTime() + max * 1000;
 
   for (const r of availableRanges) {
     const start = new Date(r.start);
     const end = new Date(start.getTime() + r.duration * 1000);
-    if (end <= dayStart || start >= visibleEnd) continue;
+    if (end.getTime() <= visibleStartMs || start.getTime() >= visibleEndMs) continue;
 
-    const clampedStart = Math.max(start - dayStart, 0) / 1000;
-    const clampedEnd = Math.min(end - dayStart, max * 1000) / 1000;
-    const left = (clampedStart / max) * 100;
-    const width = ((clampedEnd - clampedStart) / max) * 100;
+    const clampedStartMs = Math.max(start.getTime(), visibleStartMs);
+    const clampedEndMs = Math.min(end.getTime(), visibleEndMs);
+    const left = ((clampedStartMs - visibleStartMs) / (range * 1000)) * 100;
+    const width = ((clampedEndMs - clampedStartMs) / (range * 1000)) * 100;
 
     const span = document.createElement("span");
     span.className = "avail-block";
@@ -330,14 +377,74 @@ function renderAvailabilityBar() {
 function renderTicks() {
   const ticksEl = document.querySelector(".timeline .ticks");
   if (!ticksEl) return;
+  const minVal = scrubMinSec();
   const max = scrubMaxSec();
+  const range = max - minVal;
   ticksEl.innerHTML = "";
   for (let i = 0; i <= 4; i++) {
-    const sec = Math.round((max * i) / 4);
+    const sec = Math.round(minVal + (range * i) / 4);
     const span = document.createElement("span");
     span.textContent = fmtClock(sec);
     ticksEl.appendChild(span);
   }
+}
+
+function rerenderTimeline() {
+  applyScrubberMax();
+  renderTicks();
+  renderAvailabilityBar();
+  renderEventPips();
+  updateSliceLabel();
+}
+
+function updateScaleButtons() {
+  scaleDayBtn.classList.toggle("active", viewScale === "day");
+  scaleHourBtn.classList.toggle("active", viewScale === "hour");
+  scale5MinBtn.classList.toggle("active", viewScale === "5min");
+}
+
+function updateSliceLabel() {
+  if (viewScale === "day") {
+    sliceLabel.textContent = "";
+    return;
+  }
+  const start = viewStartSec;
+  const end = Math.min(viewStartSec + viewSpanSec(), 86400);
+  sliceLabel.textContent = `${fmtClock(start)} – ${fmtClock(end)}`;
+}
+
+function applyScale(scale) {
+  if (!(scale in SCALE_SPAN) || scale === viewScale) return;
+  viewScale = scale;
+  recomputeViewStart();
+  rerenderTimeline();
+  updateScaleButtons();
+}
+
+function shiftSlice(direction) {
+  // direction: -1 = earlier, +1 = later. In Day mode this steps the day
+  // picker (options are listed today→oldest, so "later" = lower index).
+  if (viewScale === "day") {
+    const idx = dayPicker.selectedIndex;
+    const newIdx = idx + (direction > 0 ? -1 : 1);
+    if (newIdx < 0 || newIdx >= dayPicker.options.length) return;
+    dayPicker.selectedIndex = newIdx;
+    dayPicker.dispatchEvent(new Event("change"));
+    return;
+  }
+  const span = viewSpanSec();
+  const live = liveEdgeOfSelectedDay();
+  const dayMax = live !== null ? live : 86399;
+  const newStart = viewStartSec + direction * span;
+  if (newStart < 0 || newStart > dayMax) return;
+  viewStartSec = newStart;
+  // Reshape the slider's range BEFORE assigning value: an HTML5 range
+  // input auto-clamps value to its current [min, max], so writing the
+  // new value first while min is still the old slice clamps it away.
+  rerenderTimeline();
+  scrubber.value = String(newStart);
+  updateCursor();
+  loadWindow();
 }
 
 function tearDownLive() {
@@ -365,13 +472,14 @@ function ensureOverlay() {
 
 function enterLiveMode() {
   mode = "live";
-  // Pin the scrubber to the live edge so the cursor + thumb track real time.
-  // applyScrubberMax may have just bumped scrubber.max forward; reset value
-  // explicitly so both thumb and cursor land on the new edge.
-  applyScrubberMax();
+  // At Hour / 5-min scales, the live edge has to fall inside the visible
+  // window or the slider/cursor pin to a stale position. Snap viewStart
+  // to whichever slice contains "now" first, then derive scrubber range.
   const live = liveEdgeOfSelectedDay();
+  if (live !== null) viewStartSec = snapToScale(live);
+  rerenderTimeline();
   if (live !== null) {
-    scrubber.value = String(live);
+    scrubber.value = String(scrubMaxSec());
     requestAnimationFrame(updateCursor);
   }
   windowLabel.textContent = "LIVE";
@@ -471,9 +579,11 @@ function loadWindow() {
 const SCRUB_THUMB_RADIUS_PX = 8;
 
 function updateCursor() {
-  const max = parseInt(scrubber.max, 10) || 86399;
+  const minVal = scrubMinSec();
+  const max = scrubMaxSec();
   const val = parseInt(scrubber.value, 10);
-  const pct = max > 0 ? val / max : 0;
+  const range = max - minVal;
+  const pct = range > 0 ? (val - minVal) / range : 0;
   const w = scrubber.offsetWidth;
   if (!w) {
     cursor.style.left = `${pct * 100}%`;
@@ -496,31 +606,32 @@ function goLive() {
   const todayMs = startOfLocalDay(new Date()).getTime();
   if (parseInt(dayPicker.value, 10) !== todayMs) {
     dayPicker.value = String(todayMs);
-    applyScrubberMax();
-    renderTicks();
-    renderAvailabilityBar();
-  }
-  if (scrubDebounce) {
-    clearTimeout(scrubDebounce);
-    scrubDebounce = null;
   }
   const live = liveEdgeOfSelectedDay();
-  if (live !== null) scrubber.value = String(live);
+  if (live !== null) {
+    viewStartSec = snapToScale(live);
+    rerenderTimeline();
+    scrubber.value = String(scrubMaxSec());
+  } else {
+    rerenderTimeline();
+  }
   loadWindow();
 }
 
 function onScrub() {
+  // Preview-only: update the cursor line and label as the user drags,
+  // but don't load a new video window until they release (the change
+  // event). Loading mid-drag was confusing — the player would jump
+  // every time the slider paused.
   const offset = parseInt(scrubber.value, 10);
-  windowLabel.textContent = `${fmtClock(offset)} local · drag and release to load`;
+  windowLabel.textContent = `${fmtClock(offset)} local · release to load`;
   updateCursor();
-  if (scrubDebounce) clearTimeout(scrubDebounce);
-  scrubDebounce = setTimeout(loadWindow, 250);
 }
 
 function seekToTimestamp(ts) {
-  // Move the day picker to ts's local day, then put the scrubber at
-  // (ts - dayStart) seconds and call loadWindow(). Used when the page
-  // is opened with ?ts=<unix epoch>, e.g. via a deep-link from /events.
+  // Move the day picker to ts's local day, snap the visible window to
+  // contain ts, then put the scrubber there and load. Used when the
+  // page opens with ?ts=<unix epoch>, e.g. via a deep-link from /events.
   const target = new Date(ts * 1000);
   const dayMs = startOfLocalDay(target).getTime();
   if (![...dayPicker.options].some(o => parseInt(o.value, 10) === dayMs)) {
@@ -529,11 +640,11 @@ function seekToTimestamp(ts) {
     return;
   }
   dayPicker.value = String(dayMs);
-  applyScrubberMax();
-  renderTicks();
-  renderAvailabilityBar();
   const offset = Math.max(0, Math.floor(ts - dayMs / 1000));
-  scrubber.value = String(Math.min(offset, parseInt(scrubber.max, 10)));
+  recomputeViewStart(offset);
+  rerenderTimeline();
+  scrubber.value = String(Math.min(offset, scrubMaxSec()));
+  updateCursor();
   loadWindow();
 }
 
@@ -545,27 +656,27 @@ function init() {
   populateDayPicker();
   applyScrubberMax();
   renderTicks();
+  updateScaleButtons();
+  updateSliceLabel();
   dayPicker.addEventListener("change", () => {
-    applyScrubberMax();
-    renderTicks();
-    renderAvailabilityBar();
+    // Day changed: stale events from the old day shouldn't render against
+    // the new day's timeline. Clear, then refresh asynchronously.
+    dayEvents = [];
+    recomputeViewStart();
+    rerenderTimeline();
     refreshDayEvents();
     loadWindow();
   });
   scrubber.addEventListener("input", onScrub);
-  scrubber.addEventListener("change", () => {
-    // change fires on release; cancel any pending input-debounce so we don't
-    // fire two identical loads (the server cache key would race on the partial
-    // file).
-    if (scrubDebounce) {
-      clearTimeout(scrubDebounce);
-      scrubDebounce = null;
-    }
-    loadWindow();
-  });
+  scrubber.addEventListener("change", loadWindow);
   goLiveBtn.addEventListener("click", goLive);
   prevEventBtn.addEventListener("click", () => gotoNeighborEvent("prev"));
   nextEventBtn.addEventListener("click", () => gotoNeighborEvent("next"));
+  scaleDayBtn.addEventListener("click", () => applyScale("day"));
+  scaleHourBtn.addEventListener("click", () => applyScale("hour"));
+  scale5MinBtn.addEventListener("click", () => applyScale("5min"));
+  prevSliceBtn.addEventListener("click", () => shiftSlice(-1));
+  nextSliceBtn.addEventListener("click", () => shiftSlice(+1));
   // Keyboard shortcuts: [ = prev event, ] = next event. Skip when the
   // user is typing in an input (the day picker is the only one) so we
   // don't fight the browser's keyboard nav.
@@ -581,18 +692,18 @@ function init() {
     statusPill.textContent = `playback error ${code}: ${msg}`;
   });
   // Keep the live edge moving on today: every 5s, advance scrubber.max.
-  // If we're in live mode, also slide the pinned thumb forward.
+  // If we're in live mode, also slide the pinned thumb forward — and at
+  // Hour / 5-min scale, slide viewStart forward too when the live edge
+  // crosses into the next slice.
   setInterval(() => {
     const wasAtMax = parseInt(scrubber.value, 10) === parseInt(scrubber.max, 10);
-    applyScrubberMax();
-    renderTicks();
-    renderAvailabilityBar();
-    // Pip positions are in % of scrubMaxSec(), and that denominator
-    // just changed; redraw so they don't drift right relative to the
-    // availability bar between 15s event refreshes.
-    renderEventPips();
+    if (mode === "live") {
+      const live = liveEdgeOfSelectedDay();
+      if (live !== null) viewStartSec = snapToScale(live);
+    }
+    rerenderTimeline();
     if (mode === "live" || wasAtMax) {
-      scrubber.value = scrubber.max;
+      scrubber.value = String(scrubMaxSec());
       updateCursor();
     }
   }, 5000);

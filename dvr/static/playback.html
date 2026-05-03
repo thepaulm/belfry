@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>belfry · playback</title>
-  <link rel="stylesheet" href="/static/viewer.css?v=18">
+  <link rel="stylesheet" href="/static/viewer.css?v=19">
   <script defer src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
   <script defer src="/static/overlay.js?v=5"></script>
-  <script defer src="/static/playback.js?v=24"></script>
+  <script defer src="/static/playback.js?v=25"></script>
 </head>
 <body class="playback-body">
   <header>
@@ -32,6 +32,17 @@
         <button id="next-event" type="button" title="Next event (])">event ▶</button>
         <span id="event-legend" class="muted"></span>
         <span id="window-label" class="muted"></span>
+      </div>
+      <div class="control-row">
+        <span class="muted">Scale</span>
+        <div class="scale-group">
+          <button id="scale-day" class="scale-btn active" type="button">Day</button>
+          <button id="scale-hour" class="scale-btn" type="button">Hour</button>
+          <button id="scale-5min" class="scale-btn" type="button">5 min</button>
+        </div>
+        <button id="prev-slice" type="button" title="Previous slice">◀</button>
+        <button id="next-slice" type="button" title="Next slice">▶</button>
+        <span id="slice-label" class="muted"></span>
       </div>
       <div class="timeline">
         <div id="availability"></div>
