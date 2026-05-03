@@ -15,17 +15,56 @@ in-flight event runs to the DB, and joins.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import signal
 import sys
 import threading
 from pathlib import Path
 
+import uvicorn
+
 from dvr.config import load_config
 from .model import Detector
 from .recorder import EventRecorder
+from .server import app as inference_app
 
 logger = logging.getLogger("belfry.inference.runner")
+
+_LIVE_HOST = "127.0.0.1"
+_LIVE_PORT = 9091
+
+
+def _run_uvicorn(stop: threading.Event) -> None:
+    """Run the inference FastAPI on a private asyncio loop in this
+    thread. install_signal_handlers=False so it doesn't fight the
+    runner's main-thread SIGTERM/SIGINT handlers; we ask the server
+    to exit ourselves once the stop event flips."""
+    config = uvicorn.Config(
+        inference_app,
+        host=_LIVE_HOST,
+        port=_LIVE_PORT,
+        log_level="warning",       # uvicorn's INFO is per-request noise
+        access_log=False,
+    )
+    config.install_signal_handlers = False
+    server = uvicorn.Server(config)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    async def _watch_stop() -> None:
+        # Poll the threading.Event from inside the asyncio loop and
+        # ask uvicorn to exit when it flips. asyncio.Event would be
+        # cleaner but the signal handler is on a different thread.
+        while not stop.is_set():
+            await asyncio.sleep(0.5)
+        server.should_exit = True
+
+    try:
+        loop.run_until_complete(asyncio.gather(server.serve(), _watch_stop()))
+    finally:
+        loop.close()
 
 
 def main() -> int:
@@ -79,6 +118,15 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _on_signal)
 
     threads: list[threading.Thread] = []
+    # SSE server thread first — recorders publish to a broadcaster that's
+    # only useful once the loop exists. publish_threadsafe no-ops while
+    # the loop reference is None, so any race here is benign.
+    uvicorn_thread = threading.Thread(
+        target=_run_uvicorn, args=(stop,), name="uvicorn", daemon=True,
+    )
+    uvicorn_thread.start()
+    logger.info("started uvicorn on %s:%d (live SSE)", _LIVE_HOST, _LIVE_PORT)
+
     for cam in cams:
         recorder = EventRecorder(
             camera_name=cam.name,

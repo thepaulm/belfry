@@ -38,6 +38,13 @@ function makeTile(cam) {
     window.location.href = playbackUrl;
   });
   grid.appendChild(tile);
+  // Attach the live bounding-box overlay if the cam is enabled. The
+  // SSE connection runs regardless of label-toggle state — flipping
+  // the toggle is a CSS-only show/hide so it stays instant.
+  if (cam.enabled && window.BoxOverlay) {
+    const wrap = tile.querySelector(".video-wrap");
+    tile.__overlay = new BoxOverlay(wrap, cam.name);
+  }
   return tile;
 }
 

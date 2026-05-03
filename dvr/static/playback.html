@@ -4,9 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>belfry · playback</title>
-  <link rel="stylesheet" href="/static/viewer.css?v=17">
+  <link rel="stylesheet" href="/static/viewer.css?v=18">
   <script defer src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
-  <script defer src="/static/playback.js?v=19"></script>
+  <script defer src="/static/overlay.js?v=1"></script>
+  <script defer src="/static/playback.js?v=20"></script>
 </head>
 <body class="playback-body">
   <header>
@@ -15,6 +16,7 @@
       <a id="back-to-set" href="/">&larr; All cameras</a>
     </nav>
     <a class="nav-link" href="/events">Events</a>
+    <button id="labels-toggle" class="labels-toggle" type="button" aria-pressed="false">Show labels</button>
     <span id="status" class="status-pill"></span>
   </header>
   <main id="playback">

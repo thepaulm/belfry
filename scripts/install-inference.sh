@@ -77,6 +77,15 @@ if ! python -c "import ultralytics" 2>/dev/null; then
         ultralytics opencv-python numpy pyyaml
 fi
 
+# --- fastapi + uvicorn (slice 5: live overlay SSE) ---------------------
+# The inference process exposes a small loopback FastAPI that streams
+# detections to browsers via SSE; the DVR proxies it under
+# /api/inference/live so OAuth gating stays in front.
+if ! python -c "import fastapi, uvicorn" 2>/dev/null; then
+    echo "==> installing fastapi + uvicorn"
+    pip install fastapi 'uvicorn[standard]'
+fi
+
 # --- onnx export deps ---------------------------------------------------
 # Needed by ultralytics' TRT export pipeline (torch → ONNX → TensorRT).
 # Ultralytics tries to AutoUpdate-install them on demand, but its

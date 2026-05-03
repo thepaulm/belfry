@@ -36,6 +36,7 @@ let dayEvents = [];          // events with ts_start inside the selected day
 let scrubDebounce = null;
 let mode = "past"; // "past" | "live"
 let liveHls = null;
+let liveOverlay = null;
 
 // Coarse class → pip color. Two reasons we collapse the rainbow into
 // three buckets: (1) keeps the legend short (person / animal / vehicle),
@@ -333,6 +334,10 @@ function tearDownLive() {
     liveHls.destroy();
     liveHls = null;
   }
+  if (liveOverlay) {
+    liveOverlay.destroy();
+    liveOverlay = null;
+  }
 }
 
 function enterLiveMode() {
@@ -351,6 +356,14 @@ function enterLiveMode() {
 
   const hlsUrl = `/hls/${encodeURIComponent(CAM)}/index.m3u8`;
   tearDownLive();
+  // Live bounding-box overlay only attaches in live mode — past mp4
+  // segments don't have a live SSE feed (and deferring overlays for
+  // past playback to a future slice). Layered on the playback video's
+  // wrapper so it scales with the player.
+  if (window.BoxOverlay) {
+    const wrap = document.querySelector(".playback-video-wrap");
+    if (wrap) liveOverlay = new BoxOverlay(wrap, CAM);
+  }
   if (player.canPlayType("application/vnd.apple.mpegurl")) {
     player.pause();
     player.src = hlsUrl;

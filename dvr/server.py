@@ -11,7 +11,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 
 from .config import Camera, CameraSet, load_config
 from .health import probe_all
@@ -226,6 +226,45 @@ async def api_events_neighbors(cam: str, ts: float) -> dict:
         "prev": {"id": prev["id"], "ts_start": prev["ts_start"]} if prev else None,
         "next": {"id": nxt["id"], "ts_start": nxt["ts_start"]} if nxt else None,
     }
+
+
+# --- live overlay SSE proxy --------------------------------------------
+# The inference process exposes /live?cam=X on 127.0.0.1:9091. We
+# proxy it here so the OAuth gate at Caddy / nginx in front of FastAPI
+# is the only public surface; the inference port stays loopback-only.
+
+_INFERENCE_LIVE = "http://127.0.0.1:9091"
+
+
+@app.get("/api/inference/live")
+async def api_inference_live(cam: str) -> StreamingResponse:
+    if cam not in {c.name for c in config.all_cameras}:
+        raise HTTPException(status_code=404, detail=f"unknown camera: {cam}")
+
+    async def relay():
+        # Long-lived stream — disable httpx's per-request timeout. The
+        # inference server emits a heartbeat comment every 15s so an
+        # idle connection still produces traffic on the wire.
+        timeout = httpx.Timeout(connect=5.0, read=None, write=None, pool=None)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream(
+                    "GET", f"{_INFERENCE_LIVE}/live", params={"cam": cam}
+                ) as r:
+                    if r.status_code != 200:
+                        body = await r.aread()
+                        yield f"event: error\ndata: upstream {r.status_code}: {body.decode('latin1', errors='replace')}\n\n".encode()
+                        return
+                    async for chunk in r.aiter_raw():
+                        yield chunk
+        except httpx.HTTPError as e:
+            yield f"event: error\ndata: inference unreachable: {e}\n\n".encode()
+
+    return StreamingResponse(
+        relay(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/events/thumb/{event_id}")

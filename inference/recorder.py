@@ -23,6 +23,7 @@ from pathlib import Path
 
 import cv2
 
+from .live import broadcaster
 from .model import Detection, Detector
 
 logger = logging.getLogger("belfry.inference.recorder")
@@ -145,6 +146,12 @@ class EventRecorder:
             except Exception:
                 logger.exception("detector failed on %s", self.camera_name)
                 continue
+
+            # Push to any live-overlay subscribers regardless of whether
+            # the detection passes the event-recorder threshold (so an
+            # empty frame still produces a "no boxes" message that lets
+            # the browser canvas clear cleanly).
+            broadcaster.publish_threadsafe(self.camera_name, ts, dets)
 
             self._update_runs(ts, dets, frame)
             self._close_stale_runs(ts)

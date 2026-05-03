@@ -375,6 +375,56 @@ main#playback {
 
 .tile .playback-link:hover { text-decoration: underline; }
 
+/* ---------- live bounding-box overlay (slice 5) ---------- */
+
+.video-wrap, .playback-video-wrap {
+  /* BoxOverlay absolute-positions its canvas inside the wrap; both
+     containers need to be a positioning context. .video-wrap already
+     is via the .tile rules; add it here to be explicit and to also
+     cover .playback-video-wrap. */
+  position: relative;
+}
+
+.overlay-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 3;
+  display: none;
+}
+
+body.labels-on .overlay-canvas {
+  display: block;
+}
+
+/* ---------- "Show labels" header toggle ---------- */
+
+.labels-toggle {
+  appearance: none;
+  background: #1c1f24;
+  color: var(--muted);
+  border: 1px solid #2a2f37;
+  padding: 0.25em 0.7em;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.labels-toggle:hover {
+  color: var(--fg);
+  background: #232830;
+}
+
+.labels-toggle.active {
+  background: var(--accent);
+  color: #06121f;
+  border-color: var(--accent);
+}
+
 /* ---------- prev/next-event buttons + class legend ---------- */
 
 #prev-event, #next-event {
