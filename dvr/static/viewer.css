@@ -305,6 +305,36 @@ main#playback {
   opacity: 0.7;
 }
 
+/* Event pip overlay — same horizontal coordinate space as #availability,
+   positioned over it so each event lines up with its moment in time.
+   Pips extend a few pixels above and below the recording bar so they're
+   distinguishable from a recorded segment. */
+#event-pips {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0.5em;       /* matches .timeline padding-top so we sit on the bar */
+  height: 6px;       /* matches #availability height */
+  pointer-events: none;
+  z-index: 1;
+}
+
+.event-pip {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  border-radius: 1px;
+  pointer-events: auto;
+  cursor: pointer;
+  opacity: 0.85;
+  transition: opacity 0.1s, filter 0.1s;
+}
+
+.event-pip:hover {
+  opacity: 1;
+  filter: brightness(1.3);
+}
+
 /* Cursor line connecting the scrubber thumb up to the availability bar.
    .timeline padding-top:0.5em + #availability height:6px = thumb-to-bar
    distance the line needs to span. */
@@ -344,6 +374,51 @@ main#playback {
 }
 
 .tile .playback-link:hover { text-decoration: underline; }
+
+/* ---------- prev/next-event buttons + class legend ---------- */
+
+#prev-event, #next-event {
+  appearance: none;
+  background: #1c1f24;
+  color: var(--fg);
+  border: 1px solid #2a2f37;
+  padding: 0.3em 0.7em;
+  border-radius: 3px;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+
+#prev-event:hover, #next-event:hover {
+  background: #232830;
+  color: var(--fg);
+}
+
+#event-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15em;
+  font-size: 0.8rem;
+}
+
+.legend-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 0.2em;
+}
+
+.legend-label {
+  margin-right: 0.6em;
+  text-transform: capitalize;
+  color: var(--fg);
+}
+
+.legend-count {
+  margin-left: 0.3em;
+}
 
 /* ---------- header navigation links (events, etc) ---------- */
 

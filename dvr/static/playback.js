@@ -18,19 +18,44 @@ const player = document.getElementById("player");
 const dayPicker = document.getElementById("day-picker");
 const scrubber = document.getElementById("scrubber");
 const availability = document.getElementById("availability");
+const eventPipsEl = document.getElementById("event-pips");
+const eventLegendEl = document.getElementById("event-legend");
 const cursor = document.getElementById("cursor");
 const windowLabel = document.getElementById("window-label");
 const backLink = document.getElementById("back-to-set");
 const goLiveBtn = document.getElementById("go-live");
+const prevEventBtn = document.getElementById("prev-event");
+const nextEventBtn = document.getElementById("next-event");
 
 if (SET_ID && CAM) {
   backLink.href = `/sets/${encodeURIComponent(SET_ID)}`;
 }
 
 let availableRanges = [];
+let dayEvents = [];          // events with ts_start inside the selected day
 let scrubDebounce = null;
 let mode = "past"; // "past" | "live"
 let liveHls = null;
+
+// Coarse class → pip color. Two reasons we collapse the rainbow into
+// three buckets: (1) keeps the legend short (person / animal / vehicle),
+// (2) the COCO subclasses dog / cat / bird don't add visual signal at
+// pip-width — a single green is enough.
+const CLASS_COLOR = {
+  person:  "#4ea1ff",
+  animal:  "#5ad17c",
+  dog:     "#5ad17c",
+  cat:     "#5ad17c",
+  bird:    "#5ad17c",
+  vehicle: "#ff9b3f",
+  car:     "#ff9b3f",
+  truck:   "#ff9b3f",
+};
+const CLASS_COLOR_DEFAULT = "#aaa";
+
+function classColor(cls) {
+  return CLASS_COLOR[cls] || CLASS_COLOR_DEFAULT;
+}
 
 // Start of the local day (00:00:00 local). The user thinks in local time;
 // we translate to UTC ISO only when constructing the MediaMTX API request.
@@ -114,6 +139,120 @@ async function refreshAvailability() {
   statusPill.textContent = `${availableRanges.length} segment${
     availableRanges.length === 1 ? "" : "s"
   }`;
+  // Events tag along on the same refresh cadence — kept in lockstep
+  // with the availability bar so the timeline is consistent.
+  refreshDayEvents();
+}
+
+async function refreshDayEvents() {
+  // Fetch the events whose ts_start falls inside the selected day. The
+  // endpoint accepts since/until in unix seconds. Pull a comfortable
+  // limit — a full day of 8-cam activity is in the hundreds of rows
+  // for this single camera, well under the API's 500 cap.
+  const dayStart = selectedDayStart();
+  const dayEndMs = dayStart.getTime() + 86400 * 1000;
+  const params = new URLSearchParams();
+  params.set("cam", CAM);
+  params.set("since", String(dayStart.getTime() / 1000));
+  params.set("until", String(dayEndMs / 1000));
+  params.set("limit", "500");
+  try {
+    const r = await fetch(`/api/events?${params.toString()}`, { credentials: "same-origin" });
+    if (!r.ok) throw new Error(`${r.status}`);
+    dayEvents = await r.json();
+  } catch {
+    // Soft-fail: events are an enhancement, not load-bearing for playback.
+    dayEvents = [];
+  }
+  renderEventPips();
+  renderEventLegend();
+}
+
+function renderEventPips() {
+  eventPipsEl.innerHTML = "";
+  const max = scrubMaxSec();
+  const dayStart = selectedDayStart();
+  for (const ev of dayEvents) {
+    // Position the pip at ts_start; stretch to ts_end so longer events
+    // (someone lingering for 30s) get a proportionally wider mark.
+    const startSec = (ev.ts_start - dayStart.getTime() / 1000);
+    const endSec = (ev.ts_end - dayStart.getTime() / 1000);
+    if (endSec < 0 || startSec > max) continue;
+    const left = (Math.max(0, startSec) / max) * 100;
+    const widthPct = ((Math.min(endSec, max) - Math.max(0, startSec)) / max) * 100;
+    const pip = document.createElement("span");
+    pip.className = "event-pip";
+    pip.style.left = `${left}%`;
+    // Floor the rendered width at a tiny minimum so a 0-second event
+    // (sample_count=1) is still visible as a hairline mark.
+    pip.style.width = `${Math.max(widthPct, 0.15)}%`;
+    pip.style.background = classColor(ev.class);
+    pip.dataset.ts = String(ev.ts_start);
+    pip.title = `${ev.class} · ${new Date(ev.ts_start * 1000).toLocaleTimeString()}`
+      + ` · conf ${ev.max_conf.toFixed(2)}`;
+    pip.addEventListener("click", () => {
+      seekToTimestamp(ev.ts_start);
+    });
+    eventPipsEl.appendChild(pip);
+  }
+}
+
+function renderEventLegend() {
+  // Show only the classes actually present in today's events to keep
+  // the header tidy. Classes are bucketed by visual color above; the
+  // legend uses the displayed bucket names.
+  const buckets = new Set();
+  for (const ev of dayEvents) {
+    if (ev.class === "person")        buckets.add("person");
+    else if (ev.class === "vehicle" || ev.class === "car" || ev.class === "truck") buckets.add("vehicle");
+    else                              buckets.add("animal");
+  }
+  if (!buckets.size) {
+    eventLegendEl.textContent = "";
+    return;
+  }
+  eventLegendEl.innerHTML = "";
+  const order = ["person", "animal", "vehicle"];
+  for (const name of order) {
+    if (!buckets.has(name)) continue;
+    const dot = document.createElement("span");
+    dot.className = "legend-dot";
+    dot.style.background = classColor(name);
+    eventLegendEl.appendChild(dot);
+    const lbl = document.createElement("span");
+    lbl.className = "legend-label";
+    lbl.textContent = name;
+    eventLegendEl.appendChild(lbl);
+  }
+  const total = document.createElement("span");
+  total.className = "legend-count muted";
+  total.textContent = `· ${dayEvents.length} event${dayEvents.length === 1 ? "" : "s"}`;
+  eventLegendEl.appendChild(total);
+}
+
+async function gotoNeighborEvent(direction) {
+  // direction: "prev" | "next". Use the current scrubber position
+  // converted to unix epoch as the cursor. Server returns the
+  // immediately-prior or immediately-following event for this camera.
+  const offset = parseInt(scrubber.value, 10);
+  const dayStart = selectedDayStart();
+  const ts = dayStart.getTime() / 1000 + offset;
+  try {
+    const r = await fetch(
+      `/api/events/neighbors?cam=${encodeURIComponent(CAM)}&ts=${ts}`,
+      { credentials: "same-origin" },
+    );
+    if (!r.ok) return;
+    const j = await r.json();
+    const target = j[direction];
+    if (target == null) {
+      statusPill.textContent = `no ${direction === "prev" ? "earlier" : "later"} event`;
+      return;
+    }
+    seekToTimestamp(target.ts_start);
+  } catch (e) {
+    statusPill.textContent = `neighbor lookup failed: ${e.message}`;
+  }
 }
 
 function selectedDayStart() {
@@ -354,6 +493,7 @@ function init() {
     applyScrubberMax();
     renderTicks();
     renderAvailabilityBar();
+    refreshDayEvents();
     loadWindow();
   });
   scrubber.addEventListener("input", onScrub);
@@ -368,6 +508,16 @@ function init() {
     loadWindow();
   });
   goLiveBtn.addEventListener("click", goLive);
+  prevEventBtn.addEventListener("click", () => gotoNeighborEvent("prev"));
+  nextEventBtn.addEventListener("click", () => gotoNeighborEvent("next"));
+  // Keyboard shortcuts: [ = prev event, ] = next event. Skip when the
+  // user is typing in an input (the day picker is the only one) so we
+  // don't fight the browser's keyboard nav.
+  window.addEventListener("keydown", (e) => {
+    if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "SELECT")) return;
+    if (e.key === "[") { e.preventDefault(); gotoNeighborEvent("prev"); }
+    else if (e.key === "]") { e.preventDefault(); gotoNeighborEvent("next"); }
+  });
   player.addEventListener("error", () => {
     const err = player.error;
     const code = err ? err.code : "?";
@@ -381,6 +531,10 @@ function init() {
     applyScrubberMax();
     renderTicks();
     renderAvailabilityBar();
+    // Pip positions are in % of scrubMaxSec(), and that denominator
+    // just changed; redraw so they don't drift right relative to the
+    // availability bar between 15s event refreshes.
+    renderEventPips();
     if (mode === "live" || wasAtMax) {
       scrubber.value = scrubber.max;
       updateCursor();
