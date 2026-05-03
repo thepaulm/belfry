@@ -79,16 +79,21 @@ fi
 
 # --- onnx export deps ---------------------------------------------------
 # Needed by ultralytics' TRT export pipeline (torch → ONNX → TensorRT).
-# Ultralytics tries to AutoUpdate-install them on demand if missing, but
-# its install call hits upstream PyPI without an --index-url, so the
-# aarch64-only onnxruntime-gpu fails to resolve and the export crashes
-# with No module named 'onnx'. Pre-install via the Jetson devpi.
-# Gated separately from the ultralytics check so adding deps later
-# doesn't get short-circuited by a half-provisioned venv.
-if ! python -c "import onnx, onnxruntime" 2>/dev/null; then
-    echo "==> installing onnx export deps (onnx + onnxslim + onnxruntime-gpu)"
-    pip install --index-url "$JETSON_INDEX" \
-        onnx onnxslim onnxruntime-gpu
+# Ultralytics tries to AutoUpdate-install them on demand, but its
+# install call hits upstream PyPI without an --index-url, so the
+# aarch64-only onnxruntime-gpu fails to resolve and the export crashes.
+# Install up front, splitting the call to dodge two failure modes:
+#   - onnxruntime-gpu has no aarch64 wheel on PyPI; pull from Jetson lab
+#   - onnx / onnxslim are cross-platform; the Jetson lab proxy has
+#     occasionally returned zero-byte responses for them (devpi mirror
+#     glitch), so pull straight from upstream PyPI to skip the proxy.
+if ! python -c "import onnxruntime" 2>/dev/null; then
+    echo "==> installing onnxruntime-gpu (Jetson aarch64 wheel)"
+    pip install --index-url "$JETSON_INDEX" onnxruntime-gpu
+fi
+if ! python -c "import onnx, onnxslim" 2>/dev/null; then
+    echo "==> installing onnx + onnxslim (upstream PyPI)"
+    pip install onnx onnxslim
 fi
 
 # --- weights ------------------------------------------------------------
