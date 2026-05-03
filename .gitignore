@@ -6,9 +6,10 @@ __pycache__/
 
 # Inference model artifacts — weights are downloaded by the install
 # script; TensorRT engines are device-specific so each Orin builds its
-# own. None of this belongs in git.
-inference/*.pt
-inference/*.engine
+# own. None of this belongs in git. The bare `*.pt` glob also catches
+# the cwd-downloaded yolo11n.pt that ultralytics auto-fetches.
+*.pt
+*.engine
 cameras.yaml
 mediamtx/mediamtx
 mediamtx/mediamtx.yml
