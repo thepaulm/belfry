@@ -36,6 +36,15 @@ function colorFor(cls) {
 // playlist + segment requests, breaking video playback.
 const _overlays = new Set();
 
+// Per-page counter so we can stagger SSE opens across multiple
+// overlays. Resets on full navigation (each page reload starts at 0).
+// We stagger by 300 ms per overlay; with 4 cams that's 0/300/600/900
+// added on top of any base delay, which gives the browser a chance to
+// recycle HTTP/1.1 connection slots between SSE attaches and HLS
+// playlist+segment fetches.
+let _overlayCounter = 0;
+const _STAGGER_MS = 300;
+
 class BoxOverlay {
   // host: a parent element (typically .video-wrap) that already has
   // position: relative. cam: camera name. The canvas inherits the
@@ -50,24 +59,20 @@ class BoxOverlay {
     this.ctx = this.canvas.getContext("2d");
     this._es = null;
     this._startTimer = null;
+    this._index = _overlayCounter++;
     this._ro = new ResizeObserver(() => this._resizeToHost());
     this._ro.observe(this.host);
     this._resizeToHost();
     _overlays.add(this);
-    if (document.body.classList.contains("labels-on")) {
-      // Defer construction-time SSE opens by ~1.5s so HLS can claim
-      // its share of the browser's HTTP/1.1 per-origin connection
-      // slots first. Without this, on every fresh page load (including
-      // a set-nav navigation) with labels persisted on, all 4 tiles'
-      // SSE constructors race the HLS playlist+segment fetches and
-      // win, leaving HLS queued forever and the videos blank. Toggle-
-      // on after the page is up doesn't need this — start() is called
-      // directly and clears the timer.
-      this._startTimer = setTimeout(() => {
-        this._startTimer = null;
-        this.start();
-      }, 1500);
-    }
+    // Construction-time SSE auto-start is intentionally OFF. With
+    // localStorage previously persisting labels-on, every fresh page
+    // load (including set-nav between /sets/set1 and /sets/set2) was
+    // racing the SSE attach against HLS playlist+segment fetches for
+    // the browser's HTTP/1.1 per-origin slots; sometimes HLS lost
+    // and videos went blank. Now SSE only opens when the user
+    // explicitly clicks the labels toggle this session — see
+    // wireLabelsToggle below. Toggle-on still staggers opens to dodge
+    // a 4-camera simultaneous-attach burst.
   }
 
   start() {
@@ -171,32 +176,37 @@ class BoxOverlay {
 }
 
 function setAllOverlays(on) {
+  if (!on) {
+    for (const o of _overlays) o.stop();
+    return;
+  }
+  // Stagger starts even on user-toggle-on: opening 4–8 EventSources
+  // simultaneously after a long-idle session can still trip the
+  // HTTP/1.1 connection cap if HLS happens to be re-fetching playlists
+  // at the same moment.
+  let i = 0;
   for (const o of _overlays) {
-    if (on) o.start();
-    else o.stop();
+    setTimeout(() => o.start(), i * _STAGGER_MS);
+    i++;
   }
 }
 
-// "Show labels" toggle wiring shared across pages. Toggling flips the
-// body class (CSS hides/shows the canvas) AND opens / closes every
-// overlay's SSE connection so we don't burn TCP slots when nobody's
-// looking. The CSS-driven visibility plus lazy SSE keeps the toggle
-// feeling instant — the first detection batch arrives within ~1s of
-// flipping it on.
+// "Show labels" toggle wiring shared across pages. Each session starts
+// labels-OFF regardless of localStorage — the auto-restart-from-storage
+// path repeatedly raced HLS for connection slots on page load. The
+// trade-off is one click per session to enable labels; the cost is a
+// gesture, the benefit is video that always plays.
 function wireLabelsToggle() {
   const btn = document.getElementById("labels-toggle");
   if (!btn) return;
-  const initial = localStorage.getItem("belfry-labels") === "on";
-  document.body.classList.toggle("labels-on", initial);
-  btn.setAttribute("aria-pressed", String(initial));
-  btn.classList.toggle("active", initial);
-  setAllOverlays(initial);
+  document.body.classList.remove("labels-on");
+  btn.setAttribute("aria-pressed", "false");
+  btn.classList.remove("active");
   btn.addEventListener("click", () => {
     const on = !document.body.classList.contains("labels-on");
     document.body.classList.toggle("labels-on", on);
     btn.setAttribute("aria-pressed", String(on));
     btn.classList.toggle("active", on);
-    localStorage.setItem("belfry-labels", on ? "on" : "off");
     setAllOverlays(on);
   });
 }
