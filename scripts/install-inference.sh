@@ -70,10 +70,18 @@ else:
     raise SystemExit('torch installed but cuda init failed; aborting')
 "
 
-# --- ultralytics + cv2 --------------------------------------------------
+# --- ultralytics + cv2 + onnx export deps -------------------------------
+# onnx + onnxslim + onnxruntime-gpu are needed by ultralytics' TRT
+# export pipeline (it goes torch → ONNX → TensorRT). Ultralytics will
+# try to AutoUpdate-install them on demand, but its install call hits
+# upstream PyPI without an --index-url so onnxruntime-gpu (aarch64)
+# fails to resolve. Pre-install via the Jetson devpi so the on-demand
+# check sees them already present and skips the install entirely.
 if ! python -c "import ultralytics" 2>/dev/null; then
-    echo "==> installing ultralytics + opencv-python + pyyaml"
-    pip install --index-url "$JETSON_INDEX" ultralytics opencv-python numpy pyyaml
+    echo "==> installing ultralytics + opencv-python + pyyaml + onnx export deps"
+    pip install --index-url "$JETSON_INDEX" \
+        ultralytics opencv-python numpy pyyaml \
+        onnx onnxslim onnxruntime-gpu
 fi
 
 # --- weights ------------------------------------------------------------
