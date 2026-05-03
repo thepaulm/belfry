@@ -29,6 +29,7 @@ Self-hosted DVR for Interlogix TVB-5301 cameras (OEM Hikvision) on a dedicated, 
 - `scripts/belfry-tunnel.service` — autossh systemd unit; opens the reverse SSH tunnel from Orin to EC2 (Caddy upstream + admin SSH back-in).
 - `scripts/belfry-inference.service` — systemd unit for the multi-camera inference runner.
 - `.venv-inference/` — separate Python 3.10 venv for the inference pipeline; the main DVR runs on uv-managed Python 3.14, but Jetson PyTorch wheels are cp310-only so inference needs its own interpreter. Gitignored.
+- `.venv-playwright/` — separate Python 3.10 venv with `playwright` + a Chromium-headless build, used for browser self-tests. Gitignored. See "Browser self-test" below.
 - `cloud/` — EC2 frontdoor: `Caddyfile`, `oauth2-proxy.cfg`, systemd units, and `install-ec2.sh` bootstrap script. Run on EC2 only.
 - `runme.sh` — gitignored throwaway shell script. Convention: when something needs sudo, write the steps here for the user to run from their own terminal.
 
@@ -152,3 +153,34 @@ Inference follow-ups:
 - Orin: NVIDIA Jetson Orin (aarch64), Ubuntu 22.04. NVIDIA GPU/NPU available but unused until Phase 4.
 - EC2: Amazon Linux 2023 x86_64, us-west-2, paulm user, EIP attached to `yellowchicken.io`.
 - Disk on Orin: 3.6 TB NVMe at `/dev/nvme0n1p1` mounted at `/`. At ~240 GB/day for 8 main-stream H.264 1080p cameras, retention defaults give ~12 days before eviction kicks in.
+
+## Browser self-test
+
+Belfry has a real LAN HTTP surface at `http://127.0.0.1/` on the Orin, so browser-side bugs can be reproduced and debugged directly from a shell rather than ping-ponging with the user. `.venv-playwright/` holds a Playwright install plus a linux-arm64 Chromium-headless build under `~/.cache/ms-playwright/`. Driven from system Python 3.10 (Playwright supports it; the main DVR's 3.14 venv is fine too if you'd rather not use the dedicated one).
+
+What it lets us do that we can't do otherwise:
+
+- **Read the JS console.** `page.on("console", lambda m: print(m.type, m.text))` catches every `Uncaught …` and `console.error(...)` — three slice-5 bugs would have been caught in one round-trip if we'd had this earlier (`CLASS_COLOR` collision, the connection-storm-on-load, the connection-storm-on-set-switch).
+- **Watch network behaviour.** `page.on("requestfinished", ...)` / `page.on("requestfailed", ...)` shows whether HLS playlist fetches actually complete vs queue forever behind sticky SSE connections. Same for `/api/sets` and `/api/events` calls.
+- **Time things.** `page.evaluate("performance.getEntriesByType('resource')")` gives per-resource timing; useful for measuring whether the 1.5 s SSE-deferral is actually winning the race.
+- **Drive flows.** Click set links, toggle "Show labels", hit `[` / `]` to step through events, etc., then assert about resulting DOM state.
+
+Provisioning is in `runme.sh` (creates `.venv-playwright/`, pip-installs `playwright`, `playwright install-deps chromium` under sudo for apt-side libs, then `playwright install chromium` as the user so the browser binary lands in `~/.cache/ms-playwright/`). Reentrant — re-runs skip the slow steps.
+
+Minimal test pattern:
+
+```python
+from playwright.sync_api import sync_playwright
+
+errs = []
+with sync_playwright() as p:
+    b = p.chromium.launch(headless=True)
+    page = b.new_page()
+    page.on("console", lambda m: m.type in ("error", "warning") and errs.append(m.text))
+    page.on("pageerror", lambda e: errs.append(str(e)))
+    page.goto("http://127.0.0.1/sets/set1")
+    page.wait_for_selector("#grid .tile")
+    # ... interact, then read state ...
+    b.close()
+print("errors:", errs)
+```

@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 .venv/
 .venv-inference/
+.venv-playwright/
 .env
 
 # Inference model artifacts — weights are downloaded by the install
