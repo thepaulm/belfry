@@ -49,19 +49,41 @@ class BoxOverlay {
     this.host.appendChild(this.canvas);
     this.ctx = this.canvas.getContext("2d");
     this._es = null;
+    this._startTimer = null;
     this._ro = new ResizeObserver(() => this._resizeToHost());
     this._ro.observe(this.host);
     this._resizeToHost();
     _overlays.add(this);
-    if (document.body.classList.contains("labels-on")) this.start();
+    if (document.body.classList.contains("labels-on")) {
+      // Defer construction-time SSE opens by ~1.5s so HLS can claim
+      // its share of the browser's HTTP/1.1 per-origin connection
+      // slots first. Without this, on every fresh page load (including
+      // a set-nav navigation) with labels persisted on, all 4 tiles'
+      // SSE constructors race the HLS playlist+segment fetches and
+      // win, leaving HLS queued forever and the videos blank. Toggle-
+      // on after the page is up doesn't need this — start() is called
+      // directly and clears the timer.
+      this._startTimer = setTimeout(() => {
+        this._startTimer = null;
+        this.start();
+      }, 1500);
+    }
   }
 
   start() {
+    if (this._startTimer) {
+      clearTimeout(this._startTimer);
+      this._startTimer = null;
+    }
     if (this._es) return;
     this._connect();
   }
 
   stop() {
+    if (this._startTimer) {
+      clearTimeout(this._startTimer);
+      this._startTimer = null;
+    }
     if (this._es) {
       this._es.close();
       this._es = null;
