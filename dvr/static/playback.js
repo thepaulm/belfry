@@ -334,6 +334,8 @@ function tearDownLive() {
     liveHls.destroy();
     liveHls = null;
   }
+  // liveOverlay handling kept here in case we re-enable the playback
+  // overlay; today nothing assigns liveOverlay so this is a no-op.
   if (liveOverlay) {
     liveOverlay.destroy();
     liveOverlay = null;
@@ -356,14 +358,10 @@ function enterLiveMode() {
 
   const hlsUrl = `/hls/${encodeURIComponent(CAM)}/index.m3u8`;
   tearDownLive();
-  // Live bounding-box overlay only attaches in live mode — past mp4
-  // segments don't have a live SSE feed (and deferring overlays for
-  // past playback to a future slice). Layered on the playback video's
-  // wrapper so it scales with the player.
-  if (window.BoxOverlay) {
-    const wrap = document.querySelector(".playback-video-wrap");
-    if (wrap) liveOverlay = new BoxOverlay(wrap, CAM);
-  }
+  // (BoxOverlay deliberately not attached on the playback page right
+  // now — turning it on broke playback in a way I haven't reproduced
+  // yet. Live tiles on the index page still get the overlay. The
+  // pre-overlay layout is restored here so video plays reliably.)
   if (player.canPlayType("application/vnd.apple.mpegurl")) {
     player.pause();
     player.src = hlsUrl;
