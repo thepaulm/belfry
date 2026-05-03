@@ -96,6 +96,29 @@ if ! python -c "import onnx, onnxslim" 2>/dev/null; then
     pip install onnx onnxslim
 fi
 
+# --- tensorrt (from JetPack, not pip) -----------------------------------
+# Ultralytics needs the `tensorrt` Python module for the engine build.
+# PyPI's tensorrt-cu12 only publishes x86_64 / Windows wheels; on
+# Jetson, TensorRT comes from JetPack and lives in the system Python's
+# dist-packages. Symlink the modules into the venv so our isolated
+# Python 3.10 can `import tensorrt` without exposing all of system
+# site-packages (which would risk numpy version conflicts).
+SYS_DIST="/usr/lib/python3.10/dist-packages"
+VENV_SITE="$VENV/lib/python3.10/site-packages"
+if ! python -c "import tensorrt" 2>/dev/null; then
+    echo "==> linking JetPack tensorrt into $VENV_SITE"
+    for pkg in tensorrt tensorrt_dispatch tensorrt_lean; do
+        for suffix in "" "-10.3.0.dist-info"; do
+            src="$SYS_DIST/${pkg}${suffix}"
+            dst="$VENV_SITE/${pkg}${suffix}"
+            if [[ -e "$src" && ! -e "$dst" ]]; then
+                ln -s "$src" "$dst"
+            fi
+        done
+    done
+fi
+python -c "import tensorrt; print('tensorrt:', tensorrt.__version__)"
+
 # --- numpy<2 pin --------------------------------------------------------
 # The Jetson aarch64 onnxruntime-gpu wheel was compiled against
 # NumPy 1.x; importing it under NumPy 2+ raises with "A module that
