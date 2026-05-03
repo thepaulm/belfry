@@ -301,8 +301,9 @@ main#playback {
   position: absolute;
   top: 0;
   bottom: 0;
-  background: var(--accent);
-  opacity: 0.7;
+  /* Neutral slate — must NOT match person-pip blue (var(--accent) =
+     #4ea1ff), or recorded-segment fills look like person events. */
+  background: #4a525c;
 }
 
 /* Event pip overlay — same horizontal coordinate space as #availability,
@@ -351,10 +352,63 @@ main#playback {
 }
 
 #scrubber {
+  /* Custom-styled instead of using the browser default, because the
+     default progress-fill (left of thumb) is the same blue as a person
+     pip on macOS Chrome/Safari, which made recorded segments look like
+     person events. We paint a uniform gray track and an orange thumb
+     that visually continues the orange cursor line. */
+  -webkit-appearance: none;
+  appearance: none;
   width: 100%;
+  height: 18px;
   margin: 0;
   position: relative;
   z-index: 1;
+  background: transparent;
+}
+
+#scrubber:focus { outline: none; }
+
+#scrubber::-webkit-slider-runnable-track {
+  height: 4px;
+  background: #2a2f37;
+  border-radius: 2px;
+}
+
+#scrubber::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ff8a4a;
+  border: 2px solid #0b0d10;
+  margin-top: -7px;
+  cursor: pointer;
+}
+
+#scrubber::-moz-range-track {
+  height: 4px;
+  background: #2a2f37;
+  border-radius: 2px;
+  border: none;
+}
+
+#scrubber::-moz-range-progress {
+  /* Same color as the track so Firefox doesn't paint a colored
+     progress fill that competes with the pip colors. */
+  height: 4px;
+  background: #2a2f37;
+  border-radius: 2px;
+}
+
+#scrubber::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ff8a4a;
+  border: 2px solid #0b0d10;
+  cursor: pointer;
 }
 
 .timeline .ticks {
