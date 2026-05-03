@@ -96,6 +96,16 @@ if ! python -c "import onnx, onnxslim" 2>/dev/null; then
     pip install onnx onnxslim
 fi
 
+# --- numpy<2 pin --------------------------------------------------------
+# The Jetson aarch64 onnxruntime-gpu wheel was compiled against
+# NumPy 1.x; importing it under NumPy 2+ raises with "A module that
+# was compiled using NumPy 1.x cannot be run in NumPy 2.2.6". torch,
+# ultralytics, and opencv all support both, so pinning down works.
+if ! python -c "import numpy, sys; sys.exit(0 if numpy.__version__.startswith('1.') else 1)" 2>/dev/null; then
+    echo "==> pinning numpy<2 (onnxruntime-gpu was built against NumPy 1.x)"
+    pip install 'numpy<2'
+fi
+
 # --- weights ------------------------------------------------------------
 mkdir -p inference
 
