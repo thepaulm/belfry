@@ -11,10 +11,11 @@ import asyncio
 import contextlib
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from .live import broadcaster
+from .playback import stream_playback
 
 logger = logging.getLogger("belfry.inference.server")
 
@@ -29,6 +30,17 @@ async def _lifespan(_: FastAPI):
 
 
 app = FastAPI(title="belfry-inference", lifespan=_lifespan)
+# Detector is constructed in runner.py before uvicorn starts and
+# stashed on app.state so the playback handler can use it.
+app.state.detector = None
+
+
+_SSE_HEADERS = {
+    # Disable any intermediary buffering; SSE depends on lines
+    # arriving promptly to feel "live".
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",
+}
 
 
 @app.get("/health")
@@ -41,10 +53,24 @@ async def live(cam: str) -> StreamingResponse:
     return StreamingResponse(
         broadcaster.stream(cam),
         media_type="text/event-stream",
-        headers={
-            # Disable any intermediary buffering; SSE depends on lines
-            # arriving promptly to feel "live".
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        headers=_SSE_HEADERS,
+    )
+
+
+@app.get("/playback")
+async def playback(
+    cam: str, start: str, duration: str, request: Request
+) -> StreamingResponse:
+    """Re-run detection over a past mp4 window. SSE; one message per
+    sampled frame (1 fps), ending when the worker reaches the end of
+    the mp4. Browser maps results by `ts` and draws on timeupdate."""
+    detector = request.app.state.detector
+    if detector is None:
+        raise HTTPException(
+            status_code=503, detail="detector not yet attached to app state"
+        )
+    return StreamingResponse(
+        stream_playback(cam, start, duration, detector),
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
     )

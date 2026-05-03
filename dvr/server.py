@@ -236,34 +236,60 @@ async def api_events_neighbors(cam: str, ts: float) -> dict:
 _INFERENCE_LIVE = "http://127.0.0.1:9091"
 
 
+_INFERENCE_SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+
+async def _proxy_inference_sse(path: str, params: dict):
+    """Stream-pass-through to the inference loopback FastAPI. Long
+    timeouts because the SSE is long-lived; the inference server emits
+    a heartbeat comment every 15 s so an idle connection still produces
+    traffic on the wire."""
+    timeout = httpx.Timeout(connect=5.0, read=None, write=None, pool=None)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "GET", f"{_INFERENCE_LIVE}{path}", params=params
+            ) as r:
+                if r.status_code != 200:
+                    body = await r.aread()
+                    yield (
+                        f"event: error\ndata: upstream {r.status_code}: "
+                        f"{body.decode('latin1', errors='replace')}\n\n"
+                    ).encode()
+                    return
+                async for chunk in r.aiter_raw():
+                    yield chunk
+    except httpx.HTTPError as e:
+        yield f"event: error\ndata: inference unreachable: {e}\n\n".encode()
+
+
 @app.get("/api/inference/live")
 async def api_inference_live(cam: str) -> StreamingResponse:
     if cam not in {c.name for c in config.all_cameras}:
         raise HTTPException(status_code=404, detail=f"unknown camera: {cam}")
-
-    async def relay():
-        # Long-lived stream — disable httpx's per-request timeout. The
-        # inference server emits a heartbeat comment every 15s so an
-        # idle connection still produces traffic on the wire.
-        timeout = httpx.Timeout(connect=5.0, read=None, write=None, pool=None)
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream(
-                    "GET", f"{_INFERENCE_LIVE}/live", params={"cam": cam}
-                ) as r:
-                    if r.status_code != 200:
-                        body = await r.aread()
-                        yield f"event: error\ndata: upstream {r.status_code}: {body.decode('latin1', errors='replace')}\n\n".encode()
-                        return
-                    async for chunk in r.aiter_raw():
-                        yield chunk
-        except httpx.HTTPError as e:
-            yield f"event: error\ndata: inference unreachable: {e}\n\n".encode()
-
     return StreamingResponse(
-        relay(),
+        _proxy_inference_sse("/live", {"cam": cam}),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers=_INFERENCE_SSE_HEADERS,
+    )
+
+
+@app.get("/api/inference/playback")
+async def api_inference_playback(
+    cam: str, start: str, duration: str
+) -> StreamingResponse:
+    """Stream box detections over a past mp4 window. Inference runs
+    flat-out (1 fps target sample × ~30 ms/frame), so a 5-min window
+    is fully processed in ~9 s of GPU. Boxes carry absolute timestamps
+    so the browser can sync them to the player's currentTime."""
+    if cam not in {c.name for c in config.all_cameras}:
+        raise HTTPException(status_code=404, detail=f"unknown camera: {cam}")
+    return StreamingResponse(
+        _proxy_inference_sse(
+            "/playback", {"cam": cam, "start": start, "duration": duration}
+        ),
+        media_type="text/event-stream",
+        headers=_INFERENCE_SSE_HEADERS,
     )
 
 

@@ -60,6 +60,16 @@ class BoxOverlay {
     this._es = null;
     this._startTimer = null;
     this._index = _overlayCounter++;
+    // "live" (default — live tiles + playback live mode) or "past"
+    // (playback past mode, set by subscribePast). The mode persists
+    // across stop()/start() cycles so labels-off → labels-on resumes
+    // the right subscription.
+    this._mode = "live";
+    this._pastUrl = null;
+    this._pastVideo = null;
+    this._pastWindowStartUnix = null;
+    this._pastSamples = null;
+    this._pastListener = null;
     this._ro = new ResizeObserver(() => this._resizeToHost());
     this._ro.observe(this.host);
     this._resizeToHost();
@@ -81,7 +91,11 @@ class BoxOverlay {
       this._startTimer = null;
     }
     if (this._es) return;
-    this._connect();
+    if (this._mode === "past") {
+      if (this._pastUrl) this._connectPast();
+    } else {
+      this._connect();
+    }
   }
 
   stop() {
@@ -93,7 +107,113 @@ class BoxOverlay {
       this._es.close();
       this._es = null;
     }
+    this._stopPastWatcher();
+    // Drop the buffered samples — when start() fires again we'll
+    // reconnect and the server replays from scratch. Mode + URL
+    // persist so we know which subscription to re-open.
+    this._pastSamples = null;
     this._clear();
+  }
+
+  // ---------------------------------------------------------------
+  // Past-mode subscription. Caller passes the absolute window start
+  // (unix seconds) so we can map sample.ts → (currentTime offset).
+  // Stores params on the instance and connects iff labels are on; if
+  // labels are off the connection waits for the toggle.
+
+  subscribePast({ url, video, windowStartUnix }) {
+    // Tear down any prior connection before configuring a new one.
+    // This is the path the playback page takes when scrubbing across
+    // 5-min window boundaries (also when transitioning live → past).
+    this.stop();
+    this._mode = "past";
+    this._pastUrl = url;
+    this._pastVideo = video;
+    this._pastWindowStartUnix = windowStartUnix;
+    if (document.body.classList.contains("labels-on")) {
+      this.start();
+    }
+  }
+
+  // Switch back to the live subscription (the default for live tiles
+  // and playback live mode). Same gating: connects only if labels-on.
+  subscribeLive() {
+    if (this._mode === "live" && this._es) return;
+    this.stop();
+    this._mode = "live";
+    this._pastUrl = null;
+    this._pastVideo = null;
+    this._pastWindowStartUnix = null;
+    if (document.body.classList.contains("labels-on")) {
+      this.start();
+    }
+  }
+
+  _connectPast() {
+    this._pastSamples = [];           // sorted by ts (server emits in order)
+    this._pastTolerance = 0.6;        // seconds; ≥ our 1 fps sample period
+    this._es = new EventSource(this._pastUrl, { withCredentials: true });
+    this._es.onmessage = (ev) => this._onPastMessage(ev);
+    this._es.onerror = () => {
+      // Past stream is one-shot; on EOF or error there's nothing to
+      // reconnect to. Close the EventSource so the browser doesn't
+      // waste retries.
+      if (this._es) {
+        this._es.close();
+        this._es = null;
+      }
+    };
+    this._startPastWatcher();
+  }
+
+  _onPastMessage(ev) {
+    let payload;
+    try { payload = JSON.parse(ev.data); }
+    catch { return; }
+    if (!this._pastSamples) return;
+    // Server emits in chronological order; cheap append without resort.
+    this._pastSamples.push(payload);
+  }
+
+  _startPastWatcher() {
+    if (!this._pastVideo) return;
+    this._pastListener = () => this._renderPastFrame();
+    this._pastVideo.addEventListener("timeupdate", this._pastListener);
+    // Render once immediately so the very first emitted box shows
+    // before the first timeupdate fires (timeupdate cadence is ~250 ms).
+    this._renderPastFrame();
+  }
+
+  _stopPastWatcher() {
+    if (this._pastVideo && this._pastListener) {
+      this._pastVideo.removeEventListener("timeupdate", this._pastListener);
+    }
+    this._pastListener = null;
+    this._pastVideo = null;
+  }
+
+  _renderPastFrame() {
+    if (!this._pastSamples || !this._pastVideo) return;
+    const target = this._pastWindowStartUnix + this._pastVideo.currentTime;
+    // Linear backwards walk: samples are sorted ascending, the right
+    // hit is almost always among the most recent few. Cap at 60
+    // samples scanned (= 1 minute of 1 fps history) before giving up.
+    const samples = this._pastSamples;
+    let best = null;
+    let bestDist = this._pastTolerance + 1;
+    for (let i = samples.length - 1, n = 0; i >= 0 && n < 60; i--, n++) {
+      const dist = Math.abs(samples[i].ts - target);
+      if (dist < bestDist) {
+        best = samples[i];
+        bestDist = dist;
+      }
+      if (samples[i].ts < target - this._pastTolerance) break;
+    }
+    if (best && bestDist <= this._pastTolerance) {
+      this._draw(best.boxes || []);
+    } else {
+      this._clear();
+    }
   }
 
   destroy() {

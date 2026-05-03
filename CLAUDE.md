@@ -13,7 +13,8 @@ Self-hosted DVR for Interlogix TVB-5301 cameras (OEM Hikvision) on a dedicated, 
 - `inference/` — object detection pipeline (Phase 4):
   - `model.py` — `Detector` wrapping MegaDetector v1000-larch (animal/person/vehicle) + YOLO11n COCO (person/dog/cat/bird/car/truck) with IoU-based output merge; thread-safe so one instance is shared across all camera threads
   - `recorder.py` — `EventRecorder` per-camera loop: 1 fps OpenCV RTSP capture, runs the detector, coalesces detections into event runs (open / extend / close on cooldown), writes one row per closed run to SQLite + a peak-conf JPEG thumbnail. Also publishes every detection (including empty batches) to the `live.broadcaster` for SSE subscribers
-  - `live.py` + `server.py` — `LiveBroadcaster` (per-camera fan-out from sync recorder threads to async SSE subscribers) and a tiny FastAPI on `127.0.0.1:9091` (`/live?cam=X` SSE, `/health`)
+  - `live.py` + `server.py` — `LiveBroadcaster` (per-camera fan-out from sync recorder threads to async SSE subscribers) and a tiny FastAPI on `127.0.0.1:9091` (`/live?cam=X` SSE for the live feed, `/playback?cam=&start=&duration=` SSE for on-demand box detection over a past mp4 window, `/health`)
+  - `playback.py` — async generator that pulls a playback mp4 from MediaMTX's loopback `/get`, decodes at 1 fps in a worker thread, runs the same Detector, streams `{ts, boxes}` SSE messages. One-shot per request; tmp file cleaned up afterwards
   - `runner.py` — production multi-camera coordinator; spawns one EventRecorder thread per camera with `inference: true`, plus a uvicorn thread for the SSE server, all sharing one Detector
   - `cli.py` — single-camera smoke-test entry (`python -m inference.cli --cam cam6`); not used in production
   - `schema.sql` — events table DDL, `CREATE … IF NOT EXISTS` so safe to re-run
@@ -113,7 +114,17 @@ Runs in `belfry-inference.service` (separate from the DVR so a torch/TRT crash d
 - `/api/inference/live?cam=X` is an SSE pass-through proxy in the DVR (`dvr/server.py`) onto `127.0.0.1:9091/live?cam=X` inside the inference process. Keeps the OAuth gate in front; the inference port is loopback-only. `X-Accel-Buffering: no` so nginx flushes immediately; long timeouts since the SSE is long-lived (15 s heartbeat from the server keeps intermediaries from closing on idle).
 - `LiveBroadcaster` bridges the sync recorder threads to async SSE subscribers via `loop.call_soon_threadsafe(q.put_nowait, msg)`. Per-subscriber `asyncio.Queue` is bounded — slow clients get drop-oldest. `publish_threadsafe` is cheap (~one dict lookup) when no subscribers, so it doesn't tax the recorder loop.
 - Browser side: `dvr/static/overlay.js` exposes `BoxOverlay` on `window`. Each instance owns a `<canvas>` layered over its host element (a `.video-wrap` per live tile, or `.playback-video-wrap` in playback live mode). The SSE connection is **lazy** — only opened when the "Show labels" pill in the header is on. Without lazy SSE the four live-tile EventSource connections plus HLS pulls blew through the browser's HTTP/1.1 per-origin cap of 6 and broke video playback. The toggle calls `start()`/`stop()` on every registered overlay; CSS hides/shows the canvas independently so flipping is instant.
-- **Known limitation**: the overlay only attaches in *live* mode (live tiles, or playback's snap-to-live). Past-mode playback (anything you scrub to or any /events click older than ~30 s) does not draw boxes — the SSE feed is from current camera frames, not the recorded mp4 you're watching. Follow-up: re-run the detector on playback segments on demand, or persist per-frame boxes alongside the events DB.
+- The toggle does **not** auto-restore from localStorage — each session starts labels-off. The persistence path repeatedly raced HLS for connection slots on page load; making the first click each session an explicit user gesture eliminates that.
+
+### Past-playback overlay (slice 4.5)
+
+Same canvas, same `BoxOverlay`, but driven by re-running the detector on the playback mp4 the browser is watching instead of subscribing to the live feed.
+
+- **`/api/inference/playback?cam=&start=&duration=`** is an SSE pass-through to the inference process's `/playback` endpoint, mirroring the live proxy.
+- Inference handler (`inference/playback.py`) pulls the same mp4 the DVR proxies for video — direct from MediaMTX `127.0.0.1:9996/get` — to a tmp file, then decodes in a worker thread with `cv2.VideoCapture` at 1 fps target sampling. Boxes from each sampled frame are emitted as `data: {"ts": <unix>, "boxes": [...]}\n\n`. Worker stops promptly when the browser disconnects (a stop-flag the async generator sets in its `finally`).
+- Inference goes flat-out — at ~30 ms/frame × 300 frames in a 5-minute window it finishes processing in ~9 s of GPU time, so by the time the user is mid-window every later box is already on the wire. Past-inference shares the same `Detector` lock as the live recorder, so live recording slows briefly while a past window is processing but does not drop frames.
+- Browser side: `BoxOverlay` gets a `subscribePast(url)` mode that subscribes to the playback SSE instead of the live one. Boxes are buffered into a sorted `ts → boxes` array; on the player's `timeupdate` event we look up the closest sample within ±0.5 s of the absolute play time (`window_start_unix + video.currentTime`) and draw it. Switching playback windows (scrubbing into a different 5-min window) tears down the old SSE and opens a new one.
+- No persisted per-frame data: re-running inference for a re-watched window is fine at our scale, and an in-memory LRU cache by `(cam, start, duration)` is the obvious next move if rewinding the same window starts to feel slow.
 
 ## Scrubback UI
 
@@ -140,7 +151,6 @@ Remaining (see `~/.claude/plans/we-have-this-dvr-resilient-lighthouse.md` for th
 
 Inference follow-ups:
 
-- **Past-playback overlay** — the live overlay only attaches in live mode. To draw boxes while scrubbing past footage, either re-run the detector on each playback mp4 window on demand (cache results) or persist per-frame boxes during the live recorder pass (~50 KB/min/cam compressed).
 - **Backfill CLI** — `python -m inference.backfill --all-cams` to populate events.db from the existing 12 days of mp4 segments. Prereq: extract the coalescing state machine from `EventRecorder` into a pure function that takes `(ts, dets, frame)` tuples. Adds a per-camera `processed_until_mtime` watermark to events.db so re-runs are incremental.
 - **Per-class threshold tuning** — after a week of real footage, drop a calibrated `class_thresholds:` block into `cameras.yaml` (likely `person: 0.55` to silence wall/edge false positives at night, `bird: 0.30` to catch partial-frame).
 - **Loopback RTSP for inference** — point the recorder at `rtsp://127.0.0.1:8554/<cam>` (MediaMTX's loopback) instead of the camera's direct RTSP, so each camera only serves one upstream connection. Should eliminate the ~1/min "read failed; reopening" warnings.

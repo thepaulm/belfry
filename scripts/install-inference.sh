@@ -77,13 +77,15 @@ if ! python -c "import ultralytics" 2>/dev/null; then
         ultralytics opencv-python numpy pyyaml
 fi
 
-# --- fastapi + uvicorn (slice 5: live overlay SSE) ---------------------
+# --- fastapi + uvicorn + httpx (slices 5 + 4.5: SSE) -------------------
 # The inference process exposes a small loopback FastAPI that streams
 # detections to browsers via SSE; the DVR proxies it under
-# /api/inference/live so OAuth gating stays in front.
-if ! python -c "import fastapi, uvicorn" 2>/dev/null; then
-    echo "==> installing fastapi + uvicorn"
-    pip install fastapi 'uvicorn[standard]'
+# /api/inference/{live,playback} so OAuth gating stays in front.
+# httpx is used by playback.py to pull the mp4 window from MediaMTX's
+# loopback /get before re-running the detector over it.
+if ! python -c "import fastapi, uvicorn, httpx" 2>/dev/null; then
+    echo "==> installing fastapi + uvicorn + httpx"
+    pip install fastapi 'uvicorn[standard]' httpx
 fi
 
 # --- onnx export deps ---------------------------------------------------

@@ -106,6 +106,8 @@ def main() -> int:
         class_thresholds=inf.class_thresholds,
         merge_iou=inf.merge_iou,
     )
+    # Make the detector reachable to /playback inside the FastAPI app.
+    inference_app.state.detector = detector
     inf.thumbs_dir.mkdir(parents=True, exist_ok=True)
 
     stop = threading.Event()

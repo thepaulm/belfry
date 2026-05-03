@@ -36,7 +36,15 @@ let dayEvents = [];          // events with ts_start inside the selected day
 let scrubDebounce = null;
 let mode = "past"; // "past" | "live"
 let liveHls = null;
-let liveOverlay = null;
+// Single BoxOverlay that lives across mode transitions. When entering
+// live mode we hook it to the SSE feed; when entering past mode (or
+// scrubbing into a different 5-min window) we re-bind it to the new
+// playback SSE with the right window-start offset. Destroyed on
+// page navigation only.
+let playbackOverlay = null;
+let pastWindowStartUnix = null;   // tracks the active past window so
+                                  // we don't re-fire subscribePast
+                                  // every time loadWindow runs
 
 // Coarse class → pip color. Two reasons we collapse the rainbow into
 // three buckets: (1) keeps the legend short (person / animal / vehicle),
@@ -337,12 +345,22 @@ function tearDownLive() {
     liveHls.destroy();
     liveHls = null;
   }
-  // liveOverlay handling kept here in case we re-enable the playback
-  // overlay; today nothing assigns liveOverlay so this is a no-op.
-  if (liveOverlay) {
-    liveOverlay.destroy();
-    liveOverlay = null;
+}
+
+function tearDownOverlay() {
+  if (playbackOverlay) {
+    playbackOverlay.destroy();
+    playbackOverlay = null;
   }
+  pastWindowStartUnix = null;
+}
+
+function ensureOverlay() {
+  if (playbackOverlay || !window.BoxOverlay) return playbackOverlay;
+  const wrap = document.querySelector(".playback-video-wrap");
+  if (!wrap) return null;
+  playbackOverlay = new BoxOverlay(wrap, CAM);
+  return playbackOverlay;
 }
 
 function enterLiveMode() {
@@ -361,15 +379,12 @@ function enterLiveMode() {
 
   const hlsUrl = `/hls/${encodeURIComponent(CAM)}/index.m3u8`;
   tearDownLive();
-  // Live bounding-box overlay only attaches in live mode — past mp4
-  // segments don't have a live SSE feed (deferring overlays for past
-  // playback to a future slice). SSE inside BoxOverlay is lazy and
-  // only opens when "Show labels" is toggled on, so the overlay
-  // attach is cheap when labels are off.
-  if (window.BoxOverlay) {
-    const wrap = document.querySelector(".playback-video-wrap");
-    if (wrap) liveOverlay = new BoxOverlay(wrap, CAM);
-  }
+  // Refresh the bounding-box overlay for live: the past-mode subscription
+  // (if any) is dropped by stop()/start() inside the overlay itself
+  // when the toggle re-fires the live URL. We re-create the overlay
+  // outright on each live-mode entry so its internal state is clean.
+  tearDownOverlay();
+  ensureOverlay();
   if (player.canPlayType("application/vnd.apple.mpegurl")) {
     player.pause();
     player.src = hlsUrl;
@@ -424,6 +439,26 @@ function loadWindow() {
   player.load();
   player.play().catch(() => {});
   windowLabel.textContent = `${fmtClock(offset)} local · ${WINDOW_S / 60}m window`;
+
+  // Past-mode bounding-box overlay: only re-subscribe when the active
+  // window actually changes (loadWindow can fire repeatedly during a
+  // single window — e.g. the 5s tick that bumps scrubber.max). The
+  // overlay's SSE only opens when "Show labels" is on, so the
+  // subscribePast call is cheap when labels are off.
+  const newWindowStart = target.getTime() / 1000;
+  if (newWindowStart !== pastWindowStartUnix) {
+    pastWindowStartUnix = newWindowStart;
+    const overlay = ensureOverlay();
+    if (overlay && document.body.classList.contains("labels-on")) {
+      overlay.subscribePast({
+        url: `/api/inference/playback?cam=${encodeURIComponent(CAM)}`
+          + `&start=${encodeURIComponent(isoStart)}`
+          + `&duration=${WINDOW_S}s`,
+        video: player,
+        windowStartUnix: newWindowStart,
+      });
+    }
+  }
 }
 
 // Approximate range-input thumb radius. Browsers inset the thumb by this
