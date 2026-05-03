@@ -5,15 +5,16 @@ Self-hosted DVR for Interlogix TVB-5301 cameras (OEM Hikvision) on a dedicated, 
 ## Layout
 
 - `dvr/` — FastAPI app:
-  - `server.py` — routes (live, playback, retention status, set/camera APIs)
+  - `server.py` — routes (live, playback, retention status, set/camera APIs, `/api/events*`, `/api/inference/live` SSE proxy, `/events` page)
   - `config.py` — `cameras.yaml` loader; `Camera`, `CameraSet`, `Recording`, `Retention`, `Inference`, `Config` dataclasses
   - `health.py` — `ffprobe`-based per-camera reachability checks
   - `retention.py` — async lifespan task that evicts oldest mp4 segments when the recordings volume crosses watermarks; also sweeps events DB rows + thumbnail JPEGs whose underlying footage has been evicted
-  - `static/` — vanilla-JS viewer: `index.html` (live grid), `playback.html` (scrubback), shared `viewer.css`
+  - `static/` — vanilla-JS viewer: `index.html` (live grid), `playback.html` (scrubback + timeline pips + prev/next event nav), `events.html` (cross-camera event browse), shared `viewer.css`, `overlay.js` (live bounding-box canvas — registered as `window.BoxOverlay`, lazy SSE)
 - `inference/` — object detection pipeline (Phase 4):
   - `model.py` — `Detector` wrapping MegaDetector v1000-larch (animal/person/vehicle) + YOLO11n COCO (person/dog/cat/bird/car/truck) with IoU-based output merge; thread-safe so one instance is shared across all camera threads
-  - `recorder.py` — `EventRecorder` per-camera loop: 1 fps OpenCV RTSP capture, runs the detector, coalesces detections into event runs (open / extend / close on cooldown), writes one row per closed run to SQLite + a peak-conf JPEG thumbnail
-  - `runner.py` — production multi-camera coordinator; spawns one EventRecorder thread per camera with `inference: true`, all sharing one Detector
+  - `recorder.py` — `EventRecorder` per-camera loop: 1 fps OpenCV RTSP capture, runs the detector, coalesces detections into event runs (open / extend / close on cooldown), writes one row per closed run to SQLite + a peak-conf JPEG thumbnail. Also publishes every detection (including empty batches) to the `live.broadcaster` for SSE subscribers
+  - `live.py` + `server.py` — `LiveBroadcaster` (per-camera fan-out from sync recorder threads to async SSE subscribers) and a tiny FastAPI on `127.0.0.1:9091` (`/live?cam=X` SSE, `/health`)
+  - `runner.py` — production multi-camera coordinator; spawns one EventRecorder thread per camera with `inference: true`, plus a uvicorn thread for the SSE server, all sharing one Detector
   - `cli.py` — single-camera smoke-test entry (`python -m inference.cli --cam cam6`); not used in production
   - `schema.sql` — events table DDL, `CREATE … IF NOT EXISTS` so safe to re-run
 - `mediamtx/` — MediaMTX binary + `mediamtx.yml`. Real config is gitignored; `mediamtx.example.yml` is the template.
@@ -88,7 +89,30 @@ Runs in `belfry-inference.service` (separate from the DVR so a torch/TRT crash d
 - **Event coalescing**: detections are sampled at `record_fps` (default 1 fps). A detection above the per-class threshold opens a "run" for that (camera, class). Subsequent detections within `cooldown_s` (default 10s) extend the run. After `cooldown_s` of silence the run closes — one row written, peak-conf frame saved as a JPEG. A person walking past for 12 s is one row, not 12.
 - **Storage**: SQLite at `recordings/events.db` (WAL), thumbnails at `recordings/thumbs/<cam>/<YYYY-MM-DD>/<ts_start>_<class>.jpg`. Realistic volume: a few hundred events/day across all cameras, ~30 KB thumbnail each, ~10 GB/year — trivial.
 - **Tuning**: `cameras.yaml` has a top-level `inference:` block with the defaults; `class_thresholds` overrides the global `conf_threshold` per class for noisy classes (e.g. raise `person` to suppress wall/edge false positives, lower `bird` to catch partial-frame detections).
-- **GPU budget**: TRT FP16 inference runs ~5 ms (YOLO11n) + ~25 ms (Larch) per frame. At 1 fps × 8 cams that's ~25% of one CUDA stream — comfortable headroom for the on-demand 5 fps live overlay coming in slice 5.
+- **GPU budget**: TRT FP16 inference runs ~5 ms (YOLO11n) + ~25 ms (Larch) per frame. At 1 fps × 8 cams it bursts to ~99% during each inference call but averages ~5% of one CUDA stream (verified via `tegrastats --interval 100` — `nvidia-smi` is useless on Jetson, the iGPU doesn't expose NVML).
+- **Read pressure on cameras**: every cam currently shows "read failed; reopening" warnings every 1–2 minutes. Both MediaMTX (HLS + recording) and the inference recorder open direct RTSP to each camera at full bitrate; Hikvision OEMs don't love serving two concurrent main-stream consumers. The fix is to point the inference recorders at MediaMTX's loopback (`rtsp://127.0.0.1:8554/<cam>`) so there's only one upstream connection per camera. Not yet done.
+
+### Read-side surface (slice 3)
+
+- `GET /api/events?cam=&class=&since=&until=&before_id=&limit=` — filtered events list, newest first. Cursor-paginate by passing the smallest `id` from the prior page back as `before_id`. Read-only `mode=ro` URI sqlite3 connection per request.
+- `GET /api/events/recent?cam=&limit=` — convenience wrapper.
+- `GET /api/events/neighbors?cam=&ts=` — `{prev, next}` event ids+timestamps; backs the prev/next-event buttons.
+- `GET /api/events/thumb/{id}` — serves the JPEG with an immutable long-cache header. Path-traversal-checked against the thumbs root.
+- `GET /events` — cross-camera browse page with filter chips (class / camera / time-window: 24h / today / 7d / all), thumbnail grid, "Load more" cursor pagination. Click a card → `/sets/<set>/<cam>/playback?ts=<ts_start>` deep-link.
+
+### Playback page event nav (slice 4)
+
+- Timeline pip overlay (`#event-pips`) sits exactly over the recording-availability bar. One colored mark per event, width proportional to event duration (clamped to a 0.15% hairline so a single-frame event still shows). Three-color bucketing — blue=person, green=animal/dog/cat/bird, orange=vehicle/car/truck. Click a pip → seek there.
+- `◀ event` / `event ▶` buttons next to Go Live, plus `[` / `]` keyboard shortcuts; back-end is `/api/events/neighbors`.
+- `#event-legend` shows only the buckets present in the current day's events plus the row count.
+- `playback.js` reads `?ts=<unix-epoch>` on init so deep-links from `/events` land on the right moment.
+
+### Live overlay (slice 5)
+
+- `/api/inference/live?cam=X` is an SSE pass-through proxy in the DVR (`dvr/server.py`) onto `127.0.0.1:9091/live?cam=X` inside the inference process. Keeps the OAuth gate in front; the inference port is loopback-only. `X-Accel-Buffering: no` so nginx flushes immediately; long timeouts since the SSE is long-lived (15 s heartbeat from the server keeps intermediaries from closing on idle).
+- `LiveBroadcaster` bridges the sync recorder threads to async SSE subscribers via `loop.call_soon_threadsafe(q.put_nowait, msg)`. Per-subscriber `asyncio.Queue` is bounded — slow clients get drop-oldest. `publish_threadsafe` is cheap (~one dict lookup) when no subscribers, so it doesn't tax the recorder loop.
+- Browser side: `dvr/static/overlay.js` exposes `BoxOverlay` on `window`. Each instance owns a `<canvas>` layered over its host element (a `.video-wrap` per live tile, or `.playback-video-wrap` in playback live mode). The SSE connection is **lazy** — only opened when the "Show labels" pill in the header is on. Without lazy SSE the four live-tile EventSource connections plus HLS pulls blew through the browser's HTTP/1.1 per-origin cap of 6 and broke video playback. The toggle calls `start()`/`stop()` on every registered overlay; CSS hides/shows the canvas independently so flipping is instant.
+- **Known limitation**: the overlay only attaches in *live* mode (live tiles, or playback's snap-to-live). Past-mode playback (anything you scrub to or any /events click older than ~30 s) does not draw boxes — the SSE feed is from current camera frames, not the recorded mp4 you're watching. Follow-up: re-run the detector on playback segments on demand, or persist per-frame boxes alongside the events DB.
 
 ## Scrubback UI
 
@@ -106,13 +130,20 @@ Shipped:
 
 - **Phase 1** — 24/7 recording, disk-watermark retention, scrubback UI.
 - **Remote access (slice of phases 2 + 3)** — Caddy + oauth2-proxy on EC2 with Google OAuth allow-listing, autossh reverse tunnel from the Orin so all video and recordings still live on-prem.
-- **Phase 4 slices 1–2** — MegaDetector + YOLO11n COCO ensemble running per-camera at 1 fps, event coalescing into SQLite, retention sweep keeps events DB in lockstep with mp4 retention. See `~/.claude/plans/object-detection.md` for the full Phase 4 plan.
+- **Phase 4 (all 5 slices)** — MegaDetector + YOLO11n ensemble at 1 fps per camera, event coalescing into SQLite, retention sweep, `/api/events*` + `/events` browse page, timeline pips + prev/next event nav on the playback page, live bounding-box overlay via SSE with a "Show labels" header toggle. See `~/.claude/plans/object-detection.md`.
 
 Remaining (see `~/.claude/plans/we-have-this-dvr-resilient-lighthouse.md` for the rest):
 
 - **Phase 2 leftovers** — push selected per-camera streams to an EC2 MediaMTX over SRT (caller mode, `runOnReady` + ffmpeg), driven by a new `forward: none|sub|main` field on `Camera`. Worth doing if the all-traffic-through-tunnel model strains residential upload; today every remote viewer pulls HLS through the Orin's upload.
 - **Phase 3 leftovers** — Flutter mobile app (iOS + Android) consuming `/api/*` and HLS. Needs a `bearer` auth mode in FastAPI: Flutter swaps a Google ID token for a server-issued JWT and sends it via `Authorization: Bearer`.
-- **Phase 4 slices 3–5** — `/api/events*` + `/events` browse page, timeline pips + prev/next on playback, on-demand live overlay (SSE) with show/hide labels toggle.
+
+Inference follow-ups:
+
+- **Past-playback overlay** — the live overlay only attaches in live mode. To draw boxes while scrubbing past footage, either re-run the detector on each playback mp4 window on demand (cache results) or persist per-frame boxes during the live recorder pass (~50 KB/min/cam compressed).
+- **Backfill CLI** — `python -m inference.backfill --all-cams` to populate events.db from the existing 12 days of mp4 segments. Prereq: extract the coalescing state machine from `EventRecorder` into a pure function that takes `(ts, dets, frame)` tuples. Adds a per-camera `processed_until_mtime` watermark to events.db so re-runs are incremental.
+- **Per-class threshold tuning** — after a week of real footage, drop a calibrated `class_thresholds:` block into `cameras.yaml` (likely `person: 0.55` to silence wall/edge false positives at night, `bird: 0.30` to catch partial-frame).
+- **Loopback RTSP for inference** — point the recorder at `rtsp://127.0.0.1:8554/<cam>` (MediaMTX's loopback) instead of the camera's direct RTSP, so each camera only serves one upstream connection. Should eliminate the ~1/min "read failed; reopening" warnings.
+- **Wildlife species fine-tune (Phase B)** — replace MegaDetector's coarse `animal` with `deer / raccoon / coyote / fox` etc. by fine-tuning on LILA BC + iWildCam crops + hand-labeled `animal` thumbnails from our own events. ~150 images/class is enough; a weekend of work. Only worth it if the `animal` bucket turns out to be too coarse in practice.
 
 ## Operational
 
