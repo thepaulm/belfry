@@ -86,7 +86,7 @@ class Detector:
         conf_threshold: float,
         class_thresholds: dict[str, float],
         merge_iou: float,
-        imgsz: int = 384,
+        imgsz: int = 640,
     ) -> None:
         self._md_pt = megadetector_pt
         self._md_engine = megadetector_engine
@@ -119,10 +119,12 @@ class Detector:
         logger.info("loading MegaDetector from %s", md_path)
         self._md = YOLO(str(md_path))
         self._md_names = dict(self._md.names)
+        logger.info("MegaDetector classes: %s", self._md_names)
 
         logger.info("loading YOLO11 from %s", yolo_path)
         self._yolo = YOLO(str(yolo_path))
         self._yolo_names = dict(self._yolo.names)
+        logger.info("YOLO11 has %d classes (using subset %s)", len(self._yolo_names), sorted(_YOLO_KEEP))
 
     def _threshold_for(self, cls: str) -> float:
         return self._class_thresholds.get(cls, self._conf_default)
@@ -168,11 +170,12 @@ class Detector:
         yolo_dets = self._normalize_boxes(yolo_raw)
 
         # Map MegaDetector raw class names through _MD_CLASS_MAP and drop
-        # anything we don't recognize.
+        # anything we don't recognize. Lowercase the lookup since the
+        # v1000 release didn't standardize casing across variants.
         md_dets = [
-            (_MD_CLASS_MAP[c], conf, bbox)
+            (_MD_CLASS_MAP[c.lower()], conf, bbox)
             for c, conf, bbox in md_dets
-            if c in _MD_CLASS_MAP
+            if c.lower() in _MD_CLASS_MAP
         ]
         # Filter YOLO down to the COCO classes we care about.
         yolo_dets = [(c, conf, bbox) for c, conf, bbox in yolo_dets if c in _YOLO_KEEP]

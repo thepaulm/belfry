@@ -75,14 +75,16 @@ shutil.copy(m.ckpt_path, 'inference/yolo11n.pt')
 fi
 
 if [[ ! -f inference/megadetector.pt ]]; then
-    echo "==> downloading MegaDetector v6 (YOLOv9-c) weights"
-    # MegaDetector v6 is published under agentmorris/MegaDetector releases.
-    # If this URL 404s, the latest known-good URL is in the README of
-    # https://github.com/agentmorris/MegaDetector
-    MD_URL="https://github.com/agentmorris/MegaDetector/releases/download/v6.0.0/MDV6-yolov9-c.pt"
+    echo "==> downloading MegaDetector v1000 (Larch / YOLO11L) weights"
+    # MegaDetector v1000 ships five variants (cedar/larch/redwood/sorrel/
+    # spruce). Larch is YOLO11L at 640 px — native Ultralytics loader,
+    # 0.969 AP, fits well alongside YOLO11n COCO on the Orin's GPU.
+    # Redwood (YOLOv5x6 @ 1280) is more accurate but ~5x heavier;
+    # cedar (YOLOv9c) needs an extra yolov9pip dep we don't want.
+    MD_URL="https://github.com/agentmorris/MegaDetector/releases/download/v1000.0/md_v1000.0.0-larch.pt"
     curl -L --fail -o inference/megadetector.pt "$MD_URL" || {
-        echo "MegaDetector download failed. Fetch MDV6-yolov9-c.pt manually from"
-        echo "  https://github.com/agentmorris/MegaDetector/releases"
+        echo "MegaDetector download failed. Fetch md_v1000.0.0-larch.pt manually from"
+        echo "  https://github.com/agentmorris/MegaDetector/releases/tag/v1000.0"
         echo "and drop it at inference/megadetector.pt, then re-run."
         exit 1
     }
@@ -101,7 +103,7 @@ build_engine() {
     echo "==> exporting $pt to TensorRT FP16 (1–2 min)"
     python -c "
 from ultralytics import YOLO
-YOLO('$pt').export(format='engine', half=True, device=0, imgsz=384)
+YOLO('$pt').export(format='engine', half=True, device=0, imgsz=640)
 "
 }
 build_engine inference/yolo11n.pt
