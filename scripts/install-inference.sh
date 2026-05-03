@@ -24,9 +24,16 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 
 # --- venv ---------------------------------------------------------------
-if [[ ! -d "$VENV" ]]; then
+# Check for bin/activate, not just the directory: a failed first run
+# (e.g. missing python3.10-venv apt package) can leave an empty
+# .venv-inference dir behind that would otherwise short-circuit this.
+if [[ ! -f "$VENV/bin/activate" ]]; then
     echo "==> creating $VENV"
-    "$PYTHON" -m venv "$VENV"
+    rm -rf "$VENV"
+    if ! "$PYTHON" -m venv "$VENV"; then
+        echo "venv creation failed — try: sudo apt install python3.10-venv" >&2
+        exit 1
+    fi
 fi
 # shellcheck source=/dev/null
 source "$VENV/bin/activate"
