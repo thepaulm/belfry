@@ -8,7 +8,10 @@ __pycache__/
 # script; TensorRT engines are device-specific so each Orin builds its
 # own. None of this belongs in git. The bare `*.pt` glob also catches
 # the cwd-downloaded yolo11n.pt that ultralytics auto-fetches.
+# *.onnx covers the intermediate ONNX dump ultralytics writes during
+# the torch → ONNX → TRT pipeline.
 *.pt
+*.onnx
 *.engine
 cameras.yaml
 mediamtx/mediamtx

@@ -1,0 +1,21 @@
+[Unit]
+Description=Belfry inference (per-camera object-detection event recorder)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=paulm
+Group=paulm
+WorkingDirectory=/home/paulm/code/belfry
+Environment=PATH=/home/paulm/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/paulm/code/belfry/scripts/run-inference.sh
+# Generous stop timeout: each recorder thread needs to release its
+# capture, flush in-flight event runs, and close its SQLite handle.
+KillMode=mixed
+TimeoutStopSec=45
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

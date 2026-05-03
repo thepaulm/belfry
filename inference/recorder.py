@@ -43,6 +43,12 @@ class _Run:
 
 
 def init_db(db_path: Path) -> sqlite3.Connection:
+    """Open an autocommit WAL connection and ensure the schema exists.
+
+    Safe to call concurrently from multiple threads — `CREATE TABLE IF
+    NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` are SQLite-locked
+    against each other, and WAL mode lets writers overlap.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), isolation_level=None)  # autocommit
     conn.execute("PRAGMA journal_mode = WAL")
@@ -52,12 +58,20 @@ def init_db(db_path: Path) -> sqlite3.Connection:
 
 
 class EventRecorder:
+    """Per-camera recorder loop. One thread = one EventRecorder.
+
+    Owns its own SQLite connection (opened in `run()`, not `__init__`,
+    because sqlite3 connections aren't safe to share across threads by
+    default and the multi-cam runner constructs all recorders on the
+    main thread before fanning out).
+    """
+
     def __init__(
         self,
         camera_name: str,
         rtsp_url: str,
         detector: Detector,
-        db: sqlite3.Connection,
+        db_path: Path,
         thumbs_dir: Path,
         record_fps: int,
         cooldown_s: int,
@@ -65,27 +79,32 @@ class EventRecorder:
         self.camera_name = camera_name
         self.rtsp_url = rtsp_url
         self.detector = detector
-        self.db = db
+        self.db_path = db_path
         self.thumbs_dir = thumbs_dir
         self.frame_interval_s = 1.0 / max(1, record_fps)
         self.cooldown_s = cooldown_s
         # Active runs keyed by class. Multiple classes can run concurrently
         # on the same camera (a person walking a dog).
         self._runs: dict[str, _Run] = {}
+        self._db: sqlite3.Connection | None = None
 
     # ------------------------------------------------------------------
     # main loop
 
     def run(self, stop_check=lambda: False) -> None:
         """Block until stop_check() returns True or the capture dies."""
+        self._db = init_db(self.db_path)
         cap = self._open_capture()
         if cap is None:
+            self._db.close()
             return
         try:
             self._loop(cap, stop_check)
         finally:
             cap.release()
             self._flush_all_runs(reason="shutdown")
+            self._db.close()
+            self._db = None
 
     def _open_capture(self):
         # FFmpeg backend is more reliable for RTSP than the default on
@@ -178,7 +197,8 @@ class EventRecorder:
 
     def _flush_run(self, run: _Run, reason: str) -> None:
         thumb_rel = self._save_thumb(run)
-        self.db.execute(
+        assert self._db is not None  # _flush_run is only reachable inside run()
+        self._db.execute(
             """
             INSERT INTO events
               (camera, class, ts_start, ts_end, max_conf, peak_bbox,

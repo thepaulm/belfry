@@ -23,7 +23,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 config = load_config(PROJECT_ROOT / "cameras.yaml")
 
-retention_loop = RetentionLoop(config.recording, config.retention)
+retention_loop = RetentionLoop(config.recording, config.retention, config.inference)
 
 
 @contextlib.asynccontextmanager

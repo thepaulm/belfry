@@ -15,7 +15,7 @@ from pathlib import Path
 
 from dvr.config import load_config
 from .model import Detector
-from .recorder import EventRecorder, init_db
+from .recorder import EventRecorder
 
 
 def main() -> int:
@@ -61,14 +61,13 @@ def main() -> int:
         class_thresholds=inf.class_thresholds,
         merge_iou=inf.merge_iou,
     )
-    db = init_db(inf.db_path)
     inf.thumbs_dir.mkdir(parents=True, exist_ok=True)
 
     recorder = EventRecorder(
         camera_name=cam.name,
         rtsp_url=cam.rtsp,
         detector=detector,
-        db=db,
+        db_path=inf.db_path,
         thumbs_dir=inf.thumbs_dir,
         record_fps=inf.record_fps,
         cooldown_s=inf.cooldown_s,
@@ -84,7 +83,6 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _stop)
 
     recorder.run(stop_check=lambda: stopped["flag"])
-    db.close()
     return 0
 
 

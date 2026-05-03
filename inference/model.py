@@ -11,6 +11,7 @@ weight files aren't present on the host.
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -102,6 +103,11 @@ class Detector:
         self._yolo: Any = None
         self._md_names: dict[int, str] = {}
         self._yolo_names: dict[int, str] = {}
+        # Ultralytics' YOLO.predict mutates state on the model object,
+        # so concurrent calls from the per-camera recorder threads need
+        # to be serialized. CUDA is single-stream by default anyway, so
+        # there's nothing real to gain from concurrent dispatch.
+        self._lock = threading.Lock()
 
     def _load(self) -> None:
         if self._md is not None and self._yolo is not None:
@@ -151,20 +157,22 @@ class Detector:
     def predict(self, frame: "np.ndarray") -> list[Detection]:
         """Run both models on one BGR frame and return merged Detections.
 
-        `frame` is the raw OpenCV BGR ndarray (HxWx3 uint8).
+        `frame` is the raw OpenCV BGR ndarray (HxWx3 uint8). Thread-safe:
+        the GPU dispatch is serialized by an internal lock.
         """
-        self._load()
+        with self._lock:
+            self._load()
 
-        # We tell ultralytics to use a low conf at the model level so we
-        # can apply our own per-class thresholds after the merge — its
-        # default 0.25 would already filter out boxes we'd want to count
-        # at a lower per-class threshold.
-        md_raw = self._md.predict(
-            frame, imgsz=self._imgsz, conf=0.10, verbose=False
-        )[0]
-        yolo_raw = self._yolo.predict(
-            frame, imgsz=self._imgsz, conf=0.10, verbose=False
-        )[0]
+            # We tell ultralytics to use a low conf at the model level so
+            # we can apply our own per-class thresholds after the merge —
+            # its default 0.25 would already filter out boxes we'd want
+            # to count at a lower per-class threshold.
+            md_raw = self._md.predict(
+                frame, imgsz=self._imgsz, conf=0.10, verbose=False
+            )[0]
+            yolo_raw = self._yolo.predict(
+                frame, imgsz=self._imgsz, conf=0.10, verbose=False
+            )[0]
 
         md_dets = self._normalize_boxes(md_raw)
         yolo_dets = self._normalize_boxes(yolo_raw)

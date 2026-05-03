@@ -4,11 +4,12 @@ import asyncio
 import logging
 import os
 import shutil
+import sqlite3
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from .config import Recording, Retention
+from .config import Inference, Recording, Retention
 
 logger = logging.getLogger("belfry.retention")
 
@@ -20,6 +21,7 @@ _PROTECTED_AGE_S = 70 * 60
 
 @dataclass
 class _Segment:
+    camera: str
     path: Path
     mtime: float
     size: int
@@ -36,13 +38,25 @@ class RetentionStatus:
     oldest_segment_at: float | None = None
     last_evicted_count: int = 0
     last_evicted_bytes: int = 0
+    # Number of events DB rows + thumbnail files cleaned up on the most
+    # recent tick. Cleanup runs every tick, not only above the high
+    # watermark, because an event with no surviving footage is a dead
+    # link regardless of disk pressure.
+    last_events_evicted: int = 0
+    last_thumbs_evicted: int = 0
     last_error: str | None = None
 
 
 class RetentionLoop:
-    def __init__(self, recording: Recording, retention: Retention) -> None:
+    def __init__(
+        self,
+        recording: Recording,
+        retention: Retention,
+        inference: Inference | None = None,
+    ) -> None:
         self.recording = recording
         self.retention = retention
+        self.inference = inference
         self.status = RetentionStatus()
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -106,8 +120,11 @@ class RetentionLoop:
         self.status.last_error = None
         self.status.last_evicted_count = 0
         self.status.last_evicted_bytes = 0
+        self.status.last_events_evicted = 0
+        self.status.last_thumbs_evicted = 0
 
         if self.status.used_pct < self.retention.evict_high_pct:
+            self._sweep_events(segments)
             return
 
         # Above high watermark — evict oldest closed segments until we drop
@@ -156,10 +173,16 @@ class RetentionLoop:
                 _PROTECTED_AGE_S,
             )
 
+        # Re-scan after evictions so the events sweep uses the new
+        # oldest-segment-per-camera floor; the eviction above may have
+        # just taken the floor up by an hour or more.
+        self._sweep_events(list(self._scan_segments(path)))
+
     def _scan_segments(self, path: Path):
         for cam_entry in os.scandir(path):
             if not cam_entry.is_dir(follow_symlinks=False):
                 continue
+            cam_name = cam_entry.name
             try:
                 for f in os.scandir(cam_entry.path):
                     if not f.is_file(follow_symlinks=False):
@@ -168,12 +191,86 @@ class RetentionLoop:
                         continue
                     st = f.stat()
                     yield _Segment(
+                        camera=cam_name,
                         path=Path(f.path),
                         mtime=st.st_mtime,
                         size=st.st_size,
                     )
             except OSError as e:
                 logger.warning("scan error in %s: %s", cam_entry.path, e)
+
+    def _sweep_events(self, segments: list[_Segment]) -> None:
+        """Delete events whose mp4 footage has been evicted, plus their
+        thumbnail JPEGs. Skipped if no inference config is wired in or
+        the events DB hasn't been created yet (running with no inference
+        cameras opted in)."""
+        if self.inference is None:
+            return
+        db_path = self.inference.db_path
+        if not db_path.exists():
+            return
+
+        # Per-camera floor: events with ts_end older than the earliest
+        # surviving mp4 segment for that camera have nothing to play
+        # back, so they get pruned. A camera with zero segments evicts
+        # everything (cutoff = +inf).
+        oldest_per_cam: dict[str, float] = {}
+        for s in segments:
+            cur = oldest_per_cam.get(s.camera)
+            if cur is None or s.mtime < cur:
+                oldest_per_cam[s.camera] = s.mtime
+
+        rows_evicted = 0
+        thumbs_evicted = 0
+        try:
+            conn = sqlite3.connect(str(db_path), isolation_level=None)
+            conn.execute("PRAGMA journal_mode = WAL")
+            try:
+                cameras_in_db = [
+                    row[0]
+                    for row in conn.execute("SELECT DISTINCT camera FROM events")
+                ]
+                for cam in cameras_in_db:
+                    cutoff = oldest_per_cam.get(cam, float("inf"))
+                    rows = list(
+                        conn.execute(
+                            "SELECT id, thumb_path FROM events "
+                            "WHERE camera = ? AND ts_end < ?",
+                            (cam, cutoff),
+                        )
+                    )
+                    if not rows:
+                        continue
+                    for _id, thumb_rel in rows:
+                        if thumb_rel:
+                            try:
+                                (self.inference.thumbs_dir / thumb_rel).unlink(
+                                    missing_ok=True
+                                )
+                                thumbs_evicted += 1
+                            except OSError as e:
+                                logger.warning(
+                                    "thumb unlink failed: %s: %s", thumb_rel, e
+                                )
+                    conn.execute(
+                        "DELETE FROM events WHERE camera = ? AND ts_end < ?",
+                        (cam, cutoff),
+                    )
+                    rows_evicted += len(rows)
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            logger.warning("events sweep failed: %s", e)
+            return
+
+        self.status.last_events_evicted = rows_evicted
+        self.status.last_thumbs_evicted = thumbs_evicted
+        if rows_evicted:
+            logger.info(
+                "retention: evicted %d events + %d thumbs (footage gone)",
+                rows_evicted,
+                thumbs_evicted,
+            )
 
     def status_dict(self) -> dict:
         return asdict(self.status)

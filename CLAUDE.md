@@ -6,18 +6,28 @@ Self-hosted DVR for Interlogix TVB-5301 cameras (OEM Hikvision) on a dedicated, 
 
 - `dvr/` — FastAPI app:
   - `server.py` — routes (live, playback, retention status, set/camera APIs)
-  - `config.py` — `cameras.yaml` loader; `Camera`, `CameraSet`, `Recording`, `Retention`, `Config` dataclasses
+  - `config.py` — `cameras.yaml` loader; `Camera`, `CameraSet`, `Recording`, `Retention`, `Inference`, `Config` dataclasses
   - `health.py` — `ffprobe`-based per-camera reachability checks
-  - `retention.py` — async lifespan task that evicts oldest mp4 segments when the recordings volume crosses watermarks
+  - `retention.py` — async lifespan task that evicts oldest mp4 segments when the recordings volume crosses watermarks; also sweeps events DB rows + thumbnail JPEGs whose underlying footage has been evicted
   - `static/` — vanilla-JS viewer: `index.html` (live grid), `playback.html` (scrubback), shared `viewer.css`
+- `inference/` — object detection pipeline (Phase 4):
+  - `model.py` — `Detector` wrapping MegaDetector v1000-larch (animal/person/vehicle) + YOLO11n COCO (person/dog/cat/bird/car/truck) with IoU-based output merge; thread-safe so one instance is shared across all camera threads
+  - `recorder.py` — `EventRecorder` per-camera loop: 1 fps OpenCV RTSP capture, runs the detector, coalesces detections into event runs (open / extend / close on cooldown), writes one row per closed run to SQLite + a peak-conf JPEG thumbnail
+  - `runner.py` — production multi-camera coordinator; spawns one EventRecorder thread per camera with `inference: true`, all sharing one Detector
+  - `cli.py` — single-camera smoke-test entry (`python -m inference.cli --cam cam6`); not used in production
+  - `schema.sql` — events table DDL, `CREATE … IF NOT EXISTS` so safe to re-run
 - `mediamtx/` — MediaMTX binary + `mediamtx.yml`. Real config is gitignored; `mediamtx.example.yml` is the template.
-- `cameras.yaml` — source of truth for camera grouping (sets), credentials, recording path, retention watermarks. Gitignored, mode 0600. Template: `cameras.example.yaml`.
-- `recordings/` — gitignored, on the 3.6 TB NVMe (`/dev/nvme0n1p1`). One subdir per camera (`recordings/cam5/...`). MediaMTX writes 1-hour fMP4 segments here.
+- `cameras.yaml` — source of truth for camera grouping (sets), credentials, recording path, retention watermarks, and inference defaults / per-camera enable. Gitignored, mode 0600. Template: `cameras.example.yaml`.
+- `recordings/` — gitignored, on the 3.6 TB NVMe (`/dev/nvme0n1p1`). One subdir per camera (`recordings/cam5/...`). MediaMTX writes 1-hour fMP4 segments here. The inference pipeline writes `recordings/events.db` (SQLite WAL) and `recordings/thumbs/<cam>/<YYYY-MM-DD>/<ts>_<class>.jpg` here too.
 - `playback_cache/` — gitignored sibling of `recordings/`. FastAPI buffers each MediaMTX `/get` response here so byte-range requests work (iOS Safari requires it for `<video>`); LRU-evicted at a 2 GiB cap.
 - `scripts/run.sh` — starts MediaMTX + uvicorn together; cleans up on Ctrl-C. Invoked by the `belfry` systemd unit at `/etc/systemd/system/belfry.service`.
+- `scripts/run-inference.sh` — invokes `.venv-inference/bin/python -m inference.runner`. Invoked by `belfry-inference.service`.
 - `scripts/install-mediamtx.sh` — fetches the MediaMTX binary for the host arch.
+- `scripts/install-inference.sh` — provisions `.venv-inference/` (Python 3.10), installs Jetson torch + ultralytics + onnx deps, downloads MegaDetector + YOLO11n weights, builds device-specific TensorRT FP16 engines.
 - `scripts/nginx-belfry.conf` — tracked copy of the Orin's nginx site (`/etc/nginx/sites-available/belfry`).
 - `scripts/belfry-tunnel.service` — autossh systemd unit; opens the reverse SSH tunnel from Orin to EC2 (Caddy upstream + admin SSH back-in).
+- `scripts/belfry-inference.service` — systemd unit for the multi-camera inference runner.
+- `.venv-inference/` — separate Python 3.10 venv for the inference pipeline; the main DVR runs on uv-managed Python 3.14, but Jetson PyTorch wheels are cp310-only so inference needs its own interpreter. Gitignored.
 - `cloud/` — EC2 frontdoor: `Caddyfile`, `oauth2-proxy.cfg`, systemd units, and `install-ec2.sh` bootstrap script. Run on EC2 only.
 - `runme.sh` — gitignored throwaway shell script. Convention: when something needs sudo, write the steps here for the user to run from their own terminal.
 
@@ -65,7 +75,20 @@ cameras.yaml groups cameras into named **sets** (e.g. `set1`, `set2`). The DVR h
 
 - 24/7 recording. Each camera writes 1-hour fMP4 segments (`recordSegmentDuration: 1h`, `recordPartDuration: 1s`).
 - Disk-aware retention runs as a FastAPI lifespan task (`dvr/retention.py`). Every `scan_interval_s` (default 60s) it `shutil.disk_usage`s the recordings volume; if usage > `evict_high_pct` (default 85), it deletes oldest mp4 files globally until usage < `evict_low_pct` (default 80). Files modified within the last 70 minutes are protected so MediaMTX never has its in-progress segment yanked. Per-camera dirs share the disk fairly under "oldest-globally" because all 8 cams record at similar bitrate.
+- Each tick also sweeps the events DB: any row whose `ts_end` is older than the oldest surviving mp4 segment for the same camera gets deleted along with its thumbnail JPEG (events outliving their footage are dead links). Runs every tick, not only above the high watermark.
 - Status visible at `GET /api/retention/status`. Eviction events log to journald under `belfry`.
+
+## Inference
+
+Runs in `belfry-inference.service` (separate from the DVR so a torch/TRT crash doesn't take down recording or the viewer; separate venv because Jetson torch wheels are cp310, the DVR is on Python 3.14).
+
+- **Models**: MegaDetector v1000-larch (YOLO11L, classes `animal/person/vehicle`) + YOLO11n COCO (filtered to `person/dog/cat/bird/car/truck`). Both exported to TensorRT FP16 once per Orin (engines are device-specific) and held resident on the GPU.
+- **Output merge**: per frame, both models predict; if a MegaDetector box and a YOLO box overlap above `merge_iou` (default 0.5) and are coarse-type compatible (`animal` ↔ `dog/cat/bird`, `vehicle` ↔ `car/truck`, `person` ↔ `person`), the more specific COCO label wins. Otherwise both survive. Effective day-1 active classes: `person, dog, cat, bird, car, truck, animal`.
+- **Per-camera fan-out** (`inference/runner.py`): one thread per camera with `inference: true`, all sharing one Detector. Detector's `predict()` is internally locked because Ultralytics' YOLO mutates state on the model object and CUDA is single-stream by default anyway. Each thread owns its own SQLite connection (sqlite3 connections aren't safe to share across threads).
+- **Event coalescing**: detections are sampled at `record_fps` (default 1 fps). A detection above the per-class threshold opens a "run" for that (camera, class). Subsequent detections within `cooldown_s` (default 10s) extend the run. After `cooldown_s` of silence the run closes — one row written, peak-conf frame saved as a JPEG. A person walking past for 12 s is one row, not 12.
+- **Storage**: SQLite at `recordings/events.db` (WAL), thumbnails at `recordings/thumbs/<cam>/<YYYY-MM-DD>/<ts_start>_<class>.jpg`. Realistic volume: a few hundred events/day across all cameras, ~30 KB thumbnail each, ~10 GB/year — trivial.
+- **Tuning**: `cameras.yaml` has a top-level `inference:` block with the defaults; `class_thresholds` overrides the global `conf_threshold` per class for noisy classes (e.g. raise `person` to suppress wall/edge false positives, lower `bird` to catch partial-frame detections).
+- **GPU budget**: TRT FP16 inference runs ~5 ms (YOLO11n) + ~25 ms (Larch) per frame. At 1 fps × 8 cams that's ~25% of one CUDA stream — comfortable headroom for the on-demand 5 fps live overlay coming in slice 5.
 
 ## Scrubback UI
 
@@ -83,16 +106,17 @@ Shipped:
 
 - **Phase 1** — 24/7 recording, disk-watermark retention, scrubback UI.
 - **Remote access (slice of phases 2 + 3)** — Caddy + oauth2-proxy on EC2 with Google OAuth allow-listing, autossh reverse tunnel from the Orin so all video and recordings still live on-prem.
+- **Phase 4 slices 1–2** — MegaDetector + YOLO11n COCO ensemble running per-camera at 1 fps, event coalescing into SQLite, retention sweep keeps events DB in lockstep with mp4 retention. See `~/.claude/plans/object-detection.md` for the full Phase 4 plan.
 
-Remaining (see `~/.claude/plans/we-have-this-dvr-resilient-lighthouse.md` for the full plan):
+Remaining (see `~/.claude/plans/we-have-this-dvr-resilient-lighthouse.md` for the rest):
 
 - **Phase 2 leftovers** — push selected per-camera streams to an EC2 MediaMTX over SRT (caller mode, `runOnReady` + ffmpeg), driven by a new `forward: none|sub|main` field on `Camera`. Worth doing if the all-traffic-through-tunnel model strains residential upload; today every remote viewer pulls HLS through the Orin's upload.
 - **Phase 3 leftovers** — Flutter mobile app (iOS + Android) consuming `/api/*` and HLS. Needs a `bearer` auth mode in FastAPI: Flutter swaps a Google ID token for a server-issued JWT and sends it via `Authorization: Bearer`.
-- **Phase 4** — on-Jetson YOLOv8n inference per camera (sub-stream tap, 1 fps), SQLite event store under `recordings/events.db`, event surfacing in the viewer + Flutter app, FCM push.
+- **Phase 4 slices 3–5** — `/api/events*` + `/events` browse page, timeline pips + prev/next on playback, on-demand live overlay (SSE) with show/hide labels toggle.
 
 ## Operational
 
-- systemd on the Orin: `belfry.service`, `belfry-tunnel.service`, and `nginx.service` are all `enabled` at boot. `belfry` and `belfry-tunnel` `Restart=on-failure` / `Restart=always` so crashes and tunnel drops recover automatically. Logs: `journalctl -u belfry` / `journalctl -u belfry-tunnel`.
+- systemd on the Orin: `belfry.service`, `belfry-tunnel.service`, `belfry-inference.service`, and `nginx.service` are all `enabled` at boot. `belfry` / `belfry-tunnel` / `belfry-inference` all `Restart=on-failure` (tunnel is `Restart=always`) so crashes and drops recover automatically. Logs: `journalctl -u belfry`, `journalctl -u belfry-tunnel`, `journalctl -u belfry-inference`.
 - systemd on EC2: `caddy.service` and `oauth2-proxy.service`. Logs: `journalctl -u caddy` / `journalctl -u oauth2-proxy`.
 - Orin: NVIDIA Jetson Orin (aarch64), Ubuntu 22.04. NVIDIA GPU/NPU available but unused until Phase 4.
 - EC2: Amazon Linux 2023 x86_64, us-west-2, paulm user, EIP attached to `yellowchicken.io`.
