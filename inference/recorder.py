@@ -1,9 +1,21 @@
 """Always-on event recorder for one camera.
 
-Per-frame loop at `record_fps` (default 1 fps): grab a frame off the
-loopback RTSP feed, run the two-model ensemble, run a per-class state
-machine that opens/extends/closes "event runs," and persist closed runs
-to SQLite plus a thumbnail JPEG snapshot.
+Two threads per recorder:
+
+  * **Drain thread** — tight `cv2.VideoCapture.read()` loop pulling
+    frames off the loopback RTSP at native rate (~30 fps), keeping
+    only the latest one in `self._latest_frame`. The drain *has to
+    consume the socket continuously*; otherwise OS-level TCP buffers
+    fill up, MediaMTX's RTSP packets stack up, and the H.264 stream
+    eventually corrupts — `cap.read()` then returns `False` and we
+    have to reopen, losing seconds of frames. This was the failure
+    mode that left huge person-shaped gaps in events.db while past
+    re-inference on the recorded mp4 found them clearly: live and
+    past disagreed because live wasn't actually getting the frames.
+  * **Inference loop** — wakes at `record_fps` (default 1 fps), grabs
+    whatever's in `self._latest_frame`, runs the detector, drives the
+    per-class state machine that opens/extends/closes event runs, and
+    persists closed runs to SQLite plus a thumbnail JPEG.
 
 The state machine writes one row per *run* (a contiguous burst of
 detections of the same class on the same camera, gap-closed by
@@ -16,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -88,6 +101,15 @@ class EventRecorder:
         # on the same camera (a person walking a dog).
         self._runs: dict[str, _Run] = {}
         self._db: sqlite3.Connection | None = None
+        # Latest frame grabbed by the drain thread; the inference loop
+        # samples it at record_fps. (frame, ts) — ts is wall-clock at
+        # read time so the inference loop doesn't need to call time()
+        # for itself and the timestamp matches when the frame actually
+        # arrived rather than when we got around to detecting on it.
+        self._latest: tuple[object, float] | None = None
+        self._latest_lock = threading.Lock()
+        self._cap = None
+        self._drain_stop = threading.Event()
 
     # ------------------------------------------------------------------
     # main loop
@@ -95,14 +117,23 @@ class EventRecorder:
     def run(self, stop_check=lambda: False) -> None:
         """Block until stop_check() returns True or the capture dies."""
         self._db = init_db(self.db_path)
-        cap = self._open_capture()
-        if cap is None:
+        self._cap = self._open_capture()
+        if self._cap is None:
             self._db.close()
             return
+
+        drain = threading.Thread(
+            target=self._drain, name=f"drain-{self.camera_name}", daemon=True,
+        )
+        drain.start()
         try:
-            self._loop(cap, stop_check)
+            self._loop(stop_check)
         finally:
-            cap.release()
+            self._drain_stop.set()
+            drain.join(timeout=5.0)
+            if self._cap is not None:
+                self._cap.release()
+                self._cap = None
             self._flush_all_runs(reason="shutdown")
             self._db.close()
             self._db = None
@@ -116,11 +147,44 @@ class EventRecorder:
             return None
         # Smallest receive buffer we can ask for so `read()` returns
         # something close to "now" rather than a stale buffered frame.
+        # With the drain thread reading at native rate this is largely
+        # belt-and-braces, but it keeps cv2 from holding multiple frames
+        # of latency if the drain ever briefly stalls.
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         logger.info("opened %s for camera %s", self.rtsp_url, self.camera_name)
         return cap
 
-    def _loop(self, cap, stop_check) -> None:
+    # ------------------------------------------------------------------
+    # drain thread — reads at native fps, keeps latest frame only.
+    # Decouples socket consumption from inference cadence so the H.264
+    # stream stays clean even when inference takes a moment.
+
+    def _drain(self) -> None:
+        while not self._drain_stop.is_set():
+            cap = self._cap
+            if cap is None:
+                # Brief gap while reopen runs; don't busy-spin.
+                time.sleep(0.5)
+                continue
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                logger.warning("drain: read failed on %s; reopening", self.camera_name)
+                self._cap = None
+                cap.release()
+                # Sleep then reopen. The inference loop will see None
+                # frames in the meantime and just skip its tick.
+                time.sleep(2.0)
+                new_cap = self._open_capture()
+                if new_cap is None:
+                    # Capture is gone for good; signal main loop by
+                    # leaving self._cap = None. We'll keep retrying.
+                    continue
+                self._cap = new_cap
+                continue
+            with self._latest_lock:
+                self._latest = (frame, time.time())
+
+    def _loop(self, stop_check) -> None:
         next_tick = time.monotonic()
         while not stop_check():
             now = time.monotonic()
@@ -129,18 +193,16 @@ class EventRecorder:
                 continue
             next_tick = now + self.frame_interval_s
 
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                logger.warning("read failed on %s; reopening", self.camera_name)
-                cap.release()
-                time.sleep(2.0)
-                new_cap = self._open_capture()
-                if new_cap is None:
-                    return
-                cap = new_cap
+            with self._latest_lock:
+                latest = self._latest
+                self._latest = None  # don't reprocess the same frame
+            if latest is None:
+                # Drain hasn't produced anything yet (startup or reopen
+                # gap). Skip this tick; the cooldown logic still fires
+                # below to close any stale runs even without new frames.
+                self._close_stale_runs(time.time())
                 continue
-
-            ts = time.time()
+            frame, ts = latest
             try:
                 dets = self.detector.predict(frame)
             except Exception:

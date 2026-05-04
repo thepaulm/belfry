@@ -41,6 +41,17 @@ let availableRanges = [];
 let dayEvents = [];          // events with ts_start inside the selected day
 let mode = "past"; // "past" | "live"
 let liveHls = null;
+// Sec-of-day where the currently-loaded past mp4 starts. Set in
+// loadWindow(), nulled in enterLiveMode(). Used by the timeupdate
+// listener to advance the slider thumb as playback progresses (the
+// slider's position is otherwise frozen at the load point, which made
+// detections look like they were happening "before" the cursor when
+// really the video had played past them).
+let pastLoadStartOffsetSec = null;
+// True between pointerdown/touchstart on the scrubber and the next
+// change event — suppresses timeupdate-driven thumb updates so they
+// don't fight a user mid-drag.
+let userScrubbing = false;
 // Slider visible-window scale. Day shows the full 24h (or up to "now"
 // for today); Hour zooms the slider to a single hour for finer
 // scrubbing; 5min zooms to a single 5-minute slot. Prev/Next-slice
@@ -472,6 +483,7 @@ function ensureOverlay() {
 
 function enterLiveMode() {
   mode = "live";
+  pastLoadStartOffsetSec = null;
   // At Hour / 5-min scales, the live edge has to fall inside the visible
   // window or the slider/cursor pin to a stale position. Snap viewStart
   // to whichever slice contains "now" first, then derive scrubber range.
@@ -528,6 +540,7 @@ function loadWindow() {
   }
 
   mode = "past";
+  pastLoadStartOffsetSec = offset;
   tearDownLive();
   updateGoLiveBtn();
   const dayStart = selectedDayStart();
@@ -668,7 +681,32 @@ function init() {
     loadWindow();
   });
   scrubber.addEventListener("input", onScrub);
-  scrubber.addEventListener("change", loadWindow);
+  scrubber.addEventListener("change", () => {
+    userScrubbing = false;
+    loadWindow();
+  });
+  // Track active drag so the timeupdate-driven thumb update below
+  // doesn't fight the user mid-scrub. Pointer events cover both mouse
+  // and touch on modern browsers.
+  scrubber.addEventListener("pointerdown", () => { userScrubbing = true; });
+  // Belt-and-braces for the touch path on Safari, which historically
+  // hasn't fired pointer events on range inputs as reliably.
+  scrubber.addEventListener("touchstart", () => { userScrubbing = true; }, { passive: true });
+  // Drive the slider thumb forward as the past-mode mp4 plays. Live
+  // mode is already pinned to the live edge by the 5s setInterval so
+  // we leave it alone here.
+  player.addEventListener("timeupdate", () => {
+    if (mode !== "past") return;
+    if (userScrubbing) return;
+    if (pastLoadStartOffsetSec === null) return;
+    const newOffset = pastLoadStartOffsetSec + Math.floor(player.currentTime);
+    const clamped = Math.min(Math.max(newOffset, scrubMinSec()), scrubMaxSec());
+    if (clamped !== parseInt(scrubber.value, 10)) {
+      scrubber.value = String(clamped);
+      windowLabel.textContent = `${fmtClock(clamped)} local · ${WINDOW_S / 60}m window`;
+      updateCursor();
+    }
+  });
   goLiveBtn.addEventListener("click", goLive);
   prevEventBtn.addEventListener("click", () => gotoNeighborEvent("prev"));
   nextEventBtn.addEventListener("click", () => gotoNeighborEvent("next"));
