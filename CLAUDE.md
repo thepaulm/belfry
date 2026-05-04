@@ -91,7 +91,7 @@ Runs in `belfry-inference.service` (separate from the DVR so a torch/TRT crash d
 - **Storage**: SQLite at `recordings/events.db` (WAL), thumbnails at `recordings/thumbs/<cam>/<YYYY-MM-DD>/<ts_start>_<class>.jpg`. Realistic volume: a few hundred events/day across all cameras, ~30 KB thumbnail each, ~10 GB/year — trivial.
 - **Tuning**: `cameras.yaml` has a top-level `inference:` block with the defaults; `class_thresholds` overrides the global `conf_threshold` per class for noisy classes (e.g. raise `person` to suppress wall/edge false positives, lower `bird` to catch partial-frame detections).
 - **GPU budget**: TRT FP16 YOLO11l ≈ 30–50 ms/frame on the Orin. At 1 fps × 8 cams that's 240–400 ms/sec sequential, well under one stream-second; verified via `tegrastats --interval 100` (`nvidia-smi` is useless on Jetson, the iGPU doesn't expose NVML).
-- **Read pressure on cameras**: every cam currently shows "read failed; reopening" warnings every 1–2 minutes. Both MediaMTX (HLS + recording) and the inference recorder open direct RTSP to each camera at full bitrate; Hikvision OEMs don't love serving two concurrent main-stream consumers. The fix is to point the inference recorders at MediaMTX's loopback (`rtsp://127.0.0.1:8554/<cam>`) so there's only one upstream connection per camera. Not yet done.
+- **Loopback RTSP for inference**: the recorder reads `rtsp://127.0.0.1:8554/<cam>` (MediaMTX's loopback) rather than the camera's direct stream, so each camera serves only one upstream consumer (the MediaMTX path) — HLS, recording, and the inference recorder all multiplex off that one session. Eliminated the per-cam "read failed; reopening" warnings every 1–2 minutes and the resulting dropped frames where the live recorder missed events that past-mode re-inference could see in the recorded mp4.
 
 ### Read-side surface (slice 3)
 
@@ -150,9 +150,8 @@ Remaining (see `~/.claude/plans/we-have-this-dvr-resilient-lighthouse.md` for th
 
 Inference follow-ups:
 
-- **Backfill CLI** — `python -m inference.backfill --all-cams` to populate events.db from the existing 12 days of mp4 segments. Prereq: extract the coalescing state machine from `EventRecorder` into a pure function that takes `(ts, dets, frame)` tuples. Adds a per-camera `processed_until_mtime` watermark to events.db so re-runs are incremental.
+- **Backfill CLI** — `inference/backfill.py` exists for one cam + a time range (e.g. `python -m inference.backfill --cam cam12 --since 90m --replace`); reuses the production `Detector` and the recorder's coalescing rules but drives off mp4 segments instead of RTSP. Useful for re-running after detector changes or filling gaps. Open work: an `--all-cams` mode + a `processed_until_mtime` watermark for incremental runs.
 - **Per-class threshold tuning** — after a week of real footage, drop a calibrated `class_thresholds:` block into `cameras.yaml` (likely `person: 0.55` to silence wall/edge false positives at night, `bird: 0.30` to catch partial-frame).
-- **Loopback RTSP for inference** — point the recorder at `rtsp://127.0.0.1:8554/<cam>` (MediaMTX's loopback) instead of the camera's direct RTSP, so each camera only serves one upstream connection. Should eliminate the ~1/min "read failed; reopening" warnings.
 - **Wildlife fine-tune (Phase B)** — YOLO11l alone has no `animal` class beyond the COCO `dog/cat/bird`, so anything else (deer, raccoon, coyote, fox) is invisible until we fine-tune. Plan: gather LILA BC + iWildCam crops plus hand-labeled crops from cam5/cam6 footage, fine-tune YOLO11l with new wildlife classes, re-export to TRT. ~150 images/class should be enough; a weekend of work.
 
 ## Operational

@@ -127,9 +127,18 @@ def main() -> int:
     logger.info("started uvicorn on %s:%d (live SSE)", _LIVE_HOST, _LIVE_PORT)
 
     for cam in cams:
+        # Pull from MediaMTX's loopback RTSP rather than the camera's
+        # direct stream. MediaMTX keeps a single upstream session per
+        # path and multiplexes it to all readers, so this adds zero
+        # extra TCP connections to the camera. Using the camera URL
+        # directly meant the Hikvisions had to serve two concurrent
+        # main-stream consumers (recording + inference), which they
+        # handle poorly — every recorder thread saw "read failed;
+        # reopening" warnings every 1–2 minutes and dropped frames.
+        loopback_rtsp = f"rtsp://127.0.0.1:8554/{cam.name}"
         recorder = EventRecorder(
             camera_name=cam.name,
-            rtsp_url=cam.rtsp,
+            rtsp_url=loopback_rtsp,
             detector=detector,
             db_path=inf.db_path,
             thumbs_dir=inf.thumbs_dir,

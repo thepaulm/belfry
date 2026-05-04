@@ -60,9 +60,11 @@ def main() -> int:
     )
     inf.thumbs_dir.mkdir(parents=True, exist_ok=True)
 
+    # Mirror runner.py: use MediaMTX loopback so we don't open a second
+    # RTSP session to the camera.
     recorder = EventRecorder(
         camera_name=cam.name,
-        rtsp_url=cam.rtsp,
+        rtsp_url=f"rtsp://127.0.0.1:8554/{cam.name}",
         detector=detector,
         db_path=inf.db_path,
         thumbs_dir=inf.thumbs_dir,

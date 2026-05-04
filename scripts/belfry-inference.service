@@ -1,7 +1,10 @@
 [Unit]
 Description=Belfry inference (per-camera object-detection event recorder)
-After=network-online.target
+After=network-online.target belfry.service
 Wants=network-online.target
+# Inference now reads from MediaMTX's loopback RTSP, so MediaMTX (in
+# belfry.service) must be up first. Soft dependency only — the recorder
+# has retry-on-read-fail logic for the case where MediaMTX restarts.
 
 [Service]
 Type=simple
