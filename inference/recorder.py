@@ -38,6 +38,7 @@ import cv2
 
 from .live import broadcaster
 from .model import Detection, Detector
+from .motion import MotionDetector
 
 logger = logging.getLogger("belfry.inference.recorder")
 
@@ -89,10 +90,12 @@ class EventRecorder:
         thumbs_dir: Path,
         record_fps: int,
         cooldown_s: int,
+        motion_detector: MotionDetector | None = None,
     ) -> None:
         self.camera_name = camera_name
         self.rtsp_url = rtsp_url
         self.detector = detector
+        self.motion_detector = motion_detector
         self.db_path = db_path
         self.thumbs_dir = thumbs_dir
         self.frame_interval_s = 1.0 / max(1, record_fps)
@@ -208,6 +211,15 @@ class EventRecorder:
             except Exception:
                 logger.exception("detector failed on %s", self.camera_name)
                 continue
+
+            if self.motion_detector is not None:
+                try:
+                    motion_dets = self.motion_detector.detect(frame, dets)
+                except Exception:
+                    logger.exception("motion detector failed on %s", self.camera_name)
+                    motion_dets = []
+                if motion_dets:
+                    dets = dets + motion_dets
 
             # Push to any live-overlay subscribers regardless of whether
             # the detection passes the event-recorder threshold (so an

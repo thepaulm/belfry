@@ -15,6 +15,7 @@ from pathlib import Path
 
 from dvr.config import load_config
 from .model import Detector
+from .motion import MotionDetector
 from .recorder import EventRecorder
 
 
@@ -60,6 +61,15 @@ def main() -> int:
     )
     inf.thumbs_dir.mkdir(parents=True, exist_ok=True)
 
+    motion_detector: MotionDetector | None = None
+    if inf.motion_on_for(cam):
+        motion_detector = MotionDetector(
+            history=inf.motion_history,
+            var_threshold=inf.motion_var_threshold,
+            min_blob_pct=inf.motion_min_blob_pct,
+            min_persistence_frames=inf.motion_min_persistence_frames,
+        )
+
     # Mirror runner.py: use MediaMTX loopback so we don't open a second
     # RTSP session to the camera.
     recorder = EventRecorder(
@@ -70,6 +80,7 @@ def main() -> int:
         thumbs_dir=inf.thumbs_dir,
         record_fps=inf.record_fps,
         cooldown_s=inf.cooldown_s,
+        motion_detector=motion_detector,
     )
 
     stopped = {"flag": False}

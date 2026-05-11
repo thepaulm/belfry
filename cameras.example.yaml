@@ -34,7 +34,6 @@ inference:
   cooldown_s: 10            # gap that closes an event run
   record_fps: 1             # always-on recorder per cam
   live_fps: 5               # on-demand viewer overlay (slice 5)
-  merge_iou: 0.5            # MegaDetector ↔ YOLO11 box overlap threshold
   event_classes:
     - person
     - dog
@@ -42,7 +41,16 @@ inference:
     - bird
     - car
     - truck
-    - animal                # MegaDetector bucket: deer, raccoon, coyote, …
+  # OpenCV MOG2 motion detector. Catches movement YOLO can't classify
+  # (deer, raccoon, opossum, …). Default off globally; turn on per cam
+  # below with `motion: true`. IoU-suppressed against YOLO so a walking
+  # person doesn't double-fire as `person` and `motion`.
+  motion:
+    enabled: false
+    history: 500            # frames of background history (~8 min at 1 fps)
+    var_threshold: 25       # higher → less sensitive (16 fires on noise)
+    min_blob_pct: 0.005     # ignore blobs <0.5% of the 640x360 proc frame
+    min_persistence_frames: 2  # box must appear in N consecutive ticks
 
 sets:
   - id: set1
@@ -52,6 +60,7 @@ sets:
         label: Backyard
         enabled: true
         inference: true     # opt-in per camera; default false
+        # motion: true      # opt-in per camera; null falls back to inference.motion.enabled
         rtsp: rtsp://admin:CHANGEME@192.168.1.10:8554/Streaming/Channels/101
 
   - id: set2

@@ -21,6 +21,10 @@ const CLASS_COLOR = {
   vehicle: "#ff9b3f",
   car:     "#ff9b3f",
   truck:   "#ff9b3f",
+  // Motion is the catch-all "something moved here" class for objects
+  // YOLO doesn't recognise (deer, raccoon, etc.). Magenta keeps it
+  // visually distinct from the three real-class buckets.
+  motion:  "#e879f9",
 };
 const DEFAULT_COLOR = "#aaa";
 
@@ -279,6 +283,15 @@ class BoxOverlay {
       const color = colorFor(cls);
 
       this.ctx.strokeStyle = color;
+      // Motion has no class identity and no real "confidence" — draw it
+      // dashed and skip the label chip so it reads as "something here,
+      // unknown class" rather than competing visually with the YOLO boxes.
+      if (cls === "motion") {
+        this.ctx.setLineDash([6, 4]);
+        this.ctx.strokeRect(px1, py1, pw, ph);
+        this.ctx.setLineDash([]);
+        continue;
+      }
       this.ctx.strokeRect(px1, py1, pw, ph);
 
       // Label chip above the box (or below if it'd clip the top).

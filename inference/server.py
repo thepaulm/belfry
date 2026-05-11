@@ -31,8 +31,11 @@ async def _lifespan(_: FastAPI):
 
 app = FastAPI(title="belfry-inference", lifespan=_lifespan)
 # Detector is constructed in runner.py before uvicorn starts and
-# stashed on app.state so the playback handler can use it.
+# stashed on app.state so the playback handler can use it. db_path
+# rides along so /playback can also surface stored motion events
+# (the YOLO re-detect would otherwise miss them in past mode).
 app.state.detector = None
+app.state.db_path = None
 
 
 _SSE_HEADERS = {
@@ -65,12 +68,13 @@ async def playback(
     sampled frame (1 fps), ending when the worker reaches the end of
     the mp4. Browser maps results by `ts` and draws on timeupdate."""
     detector = request.app.state.detector
-    if detector is None:
+    db_path = request.app.state.db_path
+    if detector is None or db_path is None:
         raise HTTPException(
-            status_code=503, detail="detector not yet attached to app state"
+            status_code=503, detail="detector / db_path not yet attached to app state"
         )
     return StreamingResponse(
-        stream_playback(cam, start, duration, detector),
+        stream_playback(cam, start, duration, detector, db_path),
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
     )

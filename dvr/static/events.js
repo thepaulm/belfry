@@ -2,7 +2,7 @@
 // renders a thumbnail grid, supports class/camera/window filter chips,
 // and deep-links each card to /sets/<set>/<cam>/playback?ts=<ts_start>.
 
-const CLASS_CHIPS = ["all", "person", "animal", "vehicle", "dog", "cat", "bird", "car", "truck"];
+const CLASS_CHIPS = ["all", "person", "animal", "vehicle", "motion", "dog", "cat", "bird", "car", "truck"];
 const PAGE_SIZE = 60;
 
 const grid = document.getElementById("events-grid");
@@ -30,7 +30,9 @@ function makeChips(parent, values, valueKey, isActive, onClick) {
     const btn = document.createElement("button");
     btn.className = "chip" + (isActive(v) ? " active" : "");
     btn.dataset[valueKey] = v;
-    btn.textContent = v === "all" ? "All" : v;
+    // "motion" isn't a real detector class — capitalise it so it reads
+    // as the pseudo-class it is alongside the lowercase YOLO classes.
+    btn.textContent = v === "all" ? "All" : v === "motion" ? "Motion" : v;
     btn.addEventListener("click", () => onClick(v));
     parent.appendChild(btn);
   }

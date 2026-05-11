@@ -26,6 +26,7 @@ import uvicorn
 
 from dvr.config import load_config
 from .model import Detector
+from .motion import MotionDetector
 from .recorder import EventRecorder
 from .server import app as inference_app
 
@@ -104,7 +105,10 @@ def main() -> int:
         class_thresholds=inf.class_thresholds,
     )
     # Make the detector reachable to /playback inside the FastAPI app.
+    # db_path rides along so the playback handler can surface stored
+    # motion events alongside the re-run YOLO boxes.
     inference_app.state.detector = detector
+    inference_app.state.db_path = inf.db_path
     inf.thumbs_dir.mkdir(parents=True, exist_ok=True)
 
     stop = threading.Event()
@@ -136,6 +140,15 @@ def main() -> int:
         # handle poorly — every recorder thread saw "read failed;
         # reopening" warnings every 1–2 minutes and dropped frames.
         loopback_rtsp = f"rtsp://127.0.0.1:8554/{cam.name}"
+        motion_detector: MotionDetector | None = None
+        if inf.motion_on_for(cam):
+            motion_detector = MotionDetector(
+                history=inf.motion_history,
+                var_threshold=inf.motion_var_threshold,
+                min_blob_pct=inf.motion_min_blob_pct,
+                min_persistence_frames=inf.motion_min_persistence_frames,
+            )
+            logger.info("motion detector enabled for %s", cam.name)
         recorder = EventRecorder(
             camera_name=cam.name,
             rtsp_url=loopback_rtsp,
@@ -144,6 +157,7 @@ def main() -> int:
             thumbs_dir=inf.thumbs_dir,
             record_fps=inf.record_fps,
             cooldown_s=inf.cooldown_s,
+            motion_detector=motion_detector,
         )
         t = threading.Thread(
             target=recorder.run,

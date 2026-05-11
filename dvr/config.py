@@ -14,6 +14,11 @@ class Camera:
     rtsp: str
     enabled: bool
     inference: bool = False
+    # Per-camera override for the inference motion detector. None falls
+    # back to ``inference.motion_enabled`` global. Set False on cameras
+    # where wind-blown vegetation or repeated light/shadow play would
+    # produce a torrent of false positives.
+    motion: bool | None = None
 
     def hls_url(self, base: str) -> str:
         return f"{base.rstrip('/')}/{self.name}/index.m3u8"
@@ -74,6 +79,18 @@ class Inference:
     thumbs_dir: Path
     # SQLite events DB.
     db_path: Path
+    # Motion-detection knobs (OpenCV MOG2). Default off; per-camera
+    # ``motion`` override on Camera flips it on per cam.
+    motion_enabled: bool
+    motion_history: int
+    motion_var_threshold: int
+    motion_min_blob_pct: float
+    motion_min_persistence_frames: int
+
+    def motion_on_for(self, cam: "Camera") -> bool:
+        """Effective motion setting for a camera: per-cam override wins,
+        global default fills in when the cam is unset."""
+        return self.motion_enabled if cam.motion is None else cam.motion
 
 
 @dataclass(frozen=True)
@@ -122,6 +139,7 @@ def _load_inference(raw: dict, project_root: Path, recording: Recording) -> Infe
             ["person", "dog", "cat", "bird", "car", "truck"],
         )
     )
+    motion = block.get("motion") or {}
     return Inference(
         yolo_pt=_resolve(
             block.get("yolo_pt", "inference/yolo11l.pt"), project_root
@@ -141,6 +159,11 @@ def _load_inference(raw: dict, project_root: Path, recording: Recording) -> Infe
         db_path=_resolve(
             block.get("db_path", recording.path / "events.db"), project_root
         ),
+        motion_enabled=bool(motion.get("enabled", False)),
+        motion_history=int(motion.get("history", 500)),
+        motion_var_threshold=int(motion.get("var_threshold", 25)),
+        motion_min_blob_pct=float(motion.get("min_blob_pct", 0.005)),
+        motion_min_persistence_frames=int(motion.get("min_persistence_frames", 2)),
     )
 
 
@@ -160,6 +183,7 @@ def load_config(path: Path | str = "cameras.yaml") -> Config:
                     rtsp=c["rtsp"],
                     enabled=bool(c.get("enabled", True)),
                     inference=bool(c.get("inference", False)),
+                    motion=(None if c.get("motion") is None else bool(c.get("motion"))),
                 )
                 for c in (s.get("cameras") or [])
             ),

@@ -16,9 +16,23 @@ Loads its own Detector instance — that means a second copy of the TRT
 engine on the GPU while the backfill is running. On Jetson that's
 ~50 MiB; the live service still works while this runs.
 
+Modes:
+- default — re-runs YOLO and writes class!='motion' events.
+- ``--motion`` — runs the MOG2 motion detector against the recorded
+  frames and writes only ``class='motion'`` events. To get IoU
+  suppression without re-running YOLO (which would compete with the
+  live recorder for the GPU), this mode reads the *existing* YOLO
+  event rows from events.db and uses each row's peak_bbox as the
+  suppression context for any sampled frame that falls inside its
+  [ts_start, ts_end]. Approximation: the live YOLO peak_bbox doesn't
+  perfectly track per-frame motion, so a person walking across frame
+  might leave a few unsuppressed motion events at the start/end of
+  their walk. Tunable later by tightening the IoU threshold.
+
 Usage:
     python -m inference.backfill --cam cam12 --since 90m
     python -m inference.backfill --cam cam12 --since 2026-05-03T20:00:00Z --replace
+    python -m inference.backfill --motion --all-cams --since 24h
 """
 
 from __future__ import annotations
@@ -36,8 +50,9 @@ from typing import Any
 
 import cv2
 
-from dvr.config import load_config
+from dvr.config import Camera, Config, load_config
 from .model import Detection, Detector
+from .motion import MotionDetector
 from .recorder import init_db
 
 logger = logging.getLogger("belfry.inference.backfill")
@@ -133,101 +148,121 @@ def _flush_run(db, cam: str, run: _Run, thumb_rel: str | None) -> None:
     )
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cam", required=True)
-    parser.add_argument(
-        "--since",
-        required=True,
-        help='ISO8601 ("2026-05-03T20:00:00Z") or relative ("90m" / "2h")',
-    )
-    parser.add_argument(
-        "--until",
-        default=None,
-        help="ISO8601; default = now",
-    )
-    parser.add_argument("--config", default="cameras.yaml")
-    parser.add_argument(
-        "--replace",
-        action="store_true",
-        help="delete existing events for this cam in the time range first",
-    )
-    parser.add_argument(
-        "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"]
-    )
-    args = parser.parse_args()
+def _active_yolo_dets_at(db, cam: str, ts: float) -> list[Detection]:
+    """Synthetic Detections for every non-motion event row covering ``ts``.
 
-    logging.basicConfig(
-        level=args.log_level,
-        format="%(asctime)s %(levelname)-7s %(name)s  %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    Motion-mode backfill doesn't re-run YOLO (would fight the live
+    recorder for GPU), so it pulls the closest available suppression
+    context from the live recorder's own YOLO event rows. The peak_bbox
+    is approximate per-frame but tight enough to suppress the typical
+    "walking person" double-detection.
+    """
+    rows = db.execute(
+        "SELECT class, max_conf, peak_bbox FROM events "
+        "WHERE camera=? AND class != 'motion' AND ts_start<=? AND ts_end>=?",
+        (cam, ts, ts),
+    ).fetchall()
+    out: list[Detection] = []
+    for cls, max_conf, peak_bbox in rows:
+        try:
+            bbox = tuple(json.loads(peak_bbox))
+        except (TypeError, ValueError):
+            continue
+        if len(bbox) != 4:
+            continue
+        out.append(Detection(cls=cls, conf=float(max_conf), bbox=bbox))
+    return out
 
-    cfg = load_config(Path(args.config))
+
+def _delete_in_range(
+    db,
+    thumbs_dir: Path,
+    cam: str,
+    since: float,
+    until: float,
+    motion_only: bool,
+) -> int:
+    """Delete existing event rows + thumbnails in [since, until) for ``cam``.
+
+    motion_only=True restricts to class='motion'. motion_only=False
+    deletes everything *except* motion (so re-running YOLO doesn't blow
+    away a separately-collected motion backfill).
+    """
+    where_cls = "class = 'motion'" if motion_only else "class != 'motion'"
+    rows = list(
+        db.execute(
+            f"SELECT id, thumb_path FROM events "
+            f"WHERE camera=? AND ts_start>=? AND ts_start<? AND {where_cls}",
+            (cam, since, until),
+        )
+    )
+    for _id, thumb_rel in rows:
+        if thumb_rel:
+            try:
+                (thumbs_dir / thumb_rel).unlink(missing_ok=True)
+            except OSError:
+                pass
+    db.execute(
+        f"DELETE FROM events "
+        f"WHERE camera=? AND ts_start>=? AND ts_start<? AND {where_cls}",
+        (cam, since, until),
+    )
+    return len(rows)
+
+
+def _run_one_cam(
+    cfg: Config,
+    cam_name: str,
+    since: float,
+    until: float,
+    *,
+    detector: Detector | None,
+    motion: bool,
+    replace: bool,
+) -> dict:
+    """Backfill one camera. Returns a stats dict.
+
+    Exactly one of `detector` (YOLO mode) or `motion=True` should be set.
+    """
     inf = cfg.inference
-
-    cam_dir = (cfg.recording.path / args.cam).resolve()
+    cam_dir = (cfg.recording.path / cam_name).resolve()
     if not cam_dir.is_dir():
-        print(f"recordings dir for {args.cam} not found: {cam_dir}", file=sys.stderr)
-        return 2
-
-    since = _parse_time(args.since)
-    until = _parse_time(args.until) if args.until else time.time()
-    if until <= since:
-        print("--until must be after --since", file=sys.stderr)
-        return 2
-
-    logger.info(
-        "backfill cam=%s  range=%s..%s (%.1f min)",
-        args.cam,
-        datetime.utcfromtimestamp(since).isoformat() + "Z",
-        datetime.utcfromtimestamp(until).isoformat() + "Z",
-        (until - since) / 60.0,
-    )
+        logger.warning("recordings dir for %s not found: %s", cam_name, cam_dir)
+        return {"frames": 0, "with_dets": 0, "events_written": 0, "missing_dir": True}
 
     segs = _list_segments(cam_dir, since, until)
     if not segs:
-        print(f"no mp4 segments in {cam_dir} for that range", file=sys.stderr)
-        return 1
-    logger.info("matched %d segment(s):", len(segs))
-    for p, s in segs:
-        logger.info("  %s  starts %s", p.name, datetime.utcfromtimestamp(s).isoformat() + "Z")
+        logger.warning("%s: no mp4 segments in range", cam_name)
+        return {"frames": 0, "with_dets": 0, "events_written": 0, "no_segments": True}
 
-    detector = Detector(
-        yolo_pt=inf.yolo_pt,
-        yolo_engine=inf.yolo_engine,
-        event_classes=inf.event_classes,
-        conf_threshold=inf.conf_threshold,
-        class_thresholds=inf.class_thresholds,
+    logger.info(
+        "%s: matched %d segment(s), mode=%s",
+        cam_name, len(segs), "motion" if motion else "yolo",
     )
+
     db = init_db(inf.db_path)
     inf.thumbs_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.replace:
-        rows = list(
-            db.execute(
-                "SELECT id, thumb_path FROM events "
-                "WHERE camera=? AND ts_start>=? AND ts_start<?",
-                (args.cam, since, until),
-            )
+    if replace:
+        n = _delete_in_range(db, inf.thumbs_dir, cam_name, since, until, motion)
+        logger.info(
+            "%s: --replace deleted %d existing %s events in range",
+            cam_name, n, "motion" if motion else "non-motion",
         )
-        for _id, thumb_rel in rows:
-            if thumb_rel:
-                try:
-                    (inf.thumbs_dir / thumb_rel).unlink(missing_ok=True)
-                except OSError:
-                    pass
-        db.execute(
-            "DELETE FROM events WHERE camera=? AND ts_start>=? AND ts_start<?",
-            (args.cam, since, until),
+
+    motion_detector: MotionDetector | None = None
+    if motion:
+        motion_detector = MotionDetector(
+            history=inf.motion_history,
+            var_threshold=inf.motion_var_threshold,
+            min_blob_pct=inf.motion_min_blob_pct,
+            min_persistence_frames=inf.motion_min_persistence_frames,
         )
-        logger.info("--replace: deleted %d existing events in range", len(rows))
 
     runs: dict[str, _Run] = {}
     stats = {"frames": 0, "with_dets": 0, "events_written": 0}
 
     def update_runs(ts: float, dets: list[Detection], frame: Any) -> None:
-        # Group by class, keep the highest-conf box for the frame (peak only persisted).
         best: dict[str, Detection] = {}
         for d in dets:
             cur = best.get(d.cls)
@@ -246,9 +281,7 @@ def main() -> int:
                 )
                 logger.info(
                     "%s open  %s @ %.2f  ts=%s",
-                    args.cam,
-                    cls,
-                    det.conf,
+                    cam_name, cls, det.conf,
                     datetime.utcfromtimestamp(ts).strftime("%H:%M:%S"),
                 )
             else:
@@ -263,16 +296,13 @@ def main() -> int:
         stale = [c for c, r in runs.items() if (ts - r.ts_end) > inf.cooldown_s]
         for cls in stale:
             r = runs.pop(cls)
-            thumb = _save_thumb(inf.thumbs_dir, args.cam, r)
-            _flush_run(db, args.cam, r, thumb)
+            thumb = _save_thumb(inf.thumbs_dir, cam_name, r)
+            _flush_run(db, cam_name, r, thumb)
             stats["events_written"] += 1
             logger.info(
                 "%s close %s  dur=%.1fs  samples=%d  conf=%.2f",
-                args.cam,
-                r.cls,
-                r.ts_end - r.ts_start,
-                r.sample_count,
-                r.max_conf,
+                cam_name, r.cls,
+                r.ts_end - r.ts_start, r.sample_count, r.max_conf,
             )
 
     t0 = time.monotonic()
@@ -282,8 +312,11 @@ def main() -> int:
             logger.warning("could not open %s; skipping", seg_path.name)
             continue
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        sample_every = max(1, int(round(fps)))
-        logger.info("processing %s  fps=%.2f  sample_every=%d frames", seg_path.name, fps, sample_every)
+        sample_every = max(1, int(round(fps / max(1, inf.record_fps))))
+        logger.info(
+            "%s: processing %s  fps=%.2f  sample_every=%d frames",
+            cam_name, seg_path.name, fps, sample_every,
+        )
         frame_idx = 0
         while True:
             ok, frame = cap.read()
@@ -297,9 +330,14 @@ def main() -> int:
                 if ts > until:
                     break
                 try:
-                    dets = detector.predict(frame)
+                    if motion:
+                        yolo_ctx = _active_yolo_dets_at(db, cam_name, ts)
+                        dets = motion_detector.detect(frame, yolo_ctx)
+                    else:
+                        assert detector is not None
+                        dets = detector.predict(frame)
                 except Exception:
-                    logger.exception("detector failed; skipping frame")
+                    logger.exception("%s: detector failed; skipping frame", cam_name)
                     frame_idx += 1
                     continue
                 stats["frames"] += 1
@@ -310,28 +348,142 @@ def main() -> int:
             frame_idx += 1
         cap.release()
 
-    # Final flush — any open runs at the end of the range get written too.
     for cls in list(runs.keys()):
         r = runs.pop(cls)
-        thumb = _save_thumb(inf.thumbs_dir, args.cam, r)
-        _flush_run(db, args.cam, r, thumb)
+        thumb = _save_thumb(inf.thumbs_dir, cam_name, r)
+        _flush_run(db, cam_name, r, thumb)
         stats["events_written"] += 1
         logger.info(
             "%s close %s  dur=%.1fs  samples=%d  conf=%.2f  (eof)",
-            args.cam,
-            r.cls,
-            r.ts_end - r.ts_start,
-            r.sample_count,
-            r.max_conf,
+            cam_name, r.cls, r.ts_end - r.ts_start, r.sample_count, r.max_conf,
         )
 
     db.close()
+    elapsed = time.monotonic() - t0
     logger.info(
-        "done in %.1fs.  sampled=%d  with_dets=%d  events_written=%d",
-        time.monotonic() - t0,
-        stats["frames"],
-        stats["with_dets"],
-        stats["events_written"],
+        "%s: done in %.1fs.  sampled=%d  with_dets=%d  events_written=%d",
+        cam_name, elapsed,
+        stats["frames"], stats["with_dets"], stats["events_written"],
+    )
+    stats["elapsed_s"] = elapsed
+    return stats
+
+
+def _resolve_cams(
+    cfg: Config, cam_arg: str | None, all_cams: bool, motion: bool,
+) -> list[Camera]:
+    if all_cams:
+        cams = [c for c in cfg.all_cameras if c.enabled and c.inference]
+        if motion:
+            cams = [c for c in cams if cfg.inference.motion_on_for(c)]
+        return cams
+    if cam_arg is None:
+        return []
+    cam = next((c for c in cfg.all_cameras if c.name == cam_arg), None)
+    return [cam] if cam else []
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cam", default=None,
+                        help="single camera name (mutually exclusive with --all-cams)")
+    parser.add_argument(
+        "--all-cams", action="store_true",
+        help="loop over every cam with `inference: true`; with --motion, "
+             "additionally filtered to cams where motion is enabled.",
+    )
+    parser.add_argument(
+        "--since",
+        required=True,
+        help='ISO8601 ("2026-05-03T20:00:00Z") or relative ("90m" / "2h" / "24h")',
+    )
+    parser.add_argument(
+        "--until",
+        default=None,
+        help="ISO8601; default = now",
+    )
+    parser.add_argument(
+        "--motion", action="store_true",
+        help="motion-detection mode: writes class='motion' rows only; "
+             "uses existing YOLO event rows from events.db for IoU "
+             "suppression instead of re-running YOLO.",
+    )
+    parser.add_argument("--config", default="cameras.yaml")
+    parser.add_argument(
+        "--replace",
+        action="store_true",
+        help="in YOLO mode delete existing non-motion events in range; "
+             "in --motion mode delete existing motion events in range.",
+    )
+    parser.add_argument(
+        "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"]
+    )
+    args = parser.parse_args()
+
+    if not args.cam and not args.all_cams:
+        print("must specify --cam <name> or --all-cams", file=sys.stderr)
+        return 2
+    if args.cam and args.all_cams:
+        print("--cam and --all-cams are mutually exclusive", file=sys.stderr)
+        return 2
+
+    logging.basicConfig(
+        level=args.log_level,
+        format="%(asctime)s %(levelname)-7s %(name)s  %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    cfg = load_config(Path(args.config))
+    inf = cfg.inference
+
+    since = _parse_time(args.since)
+    until = _parse_time(args.until) if args.until else time.time()
+    if until <= since:
+        print("--until must be after --since", file=sys.stderr)
+        return 2
+
+    cams = _resolve_cams(cfg, args.cam, args.all_cams, args.motion)
+    if not cams:
+        print("no cameras matched the selection", file=sys.stderr)
+        return 1
+
+    logger.info(
+        "backfill mode=%s  cams=%s  range=%s..%s (%.1f min)",
+        "motion" if args.motion else "yolo",
+        ",".join(c.name for c in cams),
+        datetime.utcfromtimestamp(since).isoformat() + "Z",
+        datetime.utcfromtimestamp(until).isoformat() + "Z",
+        (until - since) / 60.0,
+    )
+
+    detector: Detector | None = None
+    if not args.motion:
+        detector = Detector(
+            yolo_pt=inf.yolo_pt,
+            yolo_engine=inf.yolo_engine,
+            event_classes=inf.event_classes,
+            conf_threshold=inf.conf_threshold,
+            class_thresholds=inf.class_thresholds,
+        )
+
+    overall = {"frames": 0, "with_dets": 0, "events_written": 0, "elapsed_s": 0.0}
+    t_all = time.monotonic()
+    for cam in cams:
+        try:
+            stats = _run_one_cam(
+                cfg, cam.name, since, until,
+                detector=detector, motion=args.motion, replace=args.replace,
+            )
+        except Exception:
+            logger.exception("backfill failed for %s; continuing", cam.name)
+            continue
+        for k in ("frames", "with_dets", "events_written", "elapsed_s"):
+            overall[k] += stats.get(k, 0)
+
+    logger.info(
+        "all-cams done in %.1fs (per-cam sum %.1fs).  sampled=%d  with_dets=%d  events_written=%d",
+        time.monotonic() - t_all, overall["elapsed_s"],
+        overall["frames"], overall["with_dets"], overall["events_written"],
     )
     return 0
 

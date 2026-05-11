@@ -85,6 +85,7 @@ const PIP_COLOR = {
   vehicle: "#ff9b3f",
   car:     "#ff9b3f",
   truck:   "#ff9b3f",
+  motion:  "#e879f9",   // unknown-class "something moved" events
 };
 const PIP_COLOR_DEFAULT = "#aaa";
 
@@ -243,6 +244,7 @@ function renderEventLegend() {
   for (const ev of dayEvents) {
     if (ev.class === "person")        buckets.add("person");
     else if (ev.class === "vehicle" || ev.class === "car" || ev.class === "truck") buckets.add("vehicle");
+    else if (ev.class === "motion")   buckets.add("motion");
     else                              buckets.add("animal");
   }
   if (!buckets.size) {
@@ -250,7 +252,7 @@ function renderEventLegend() {
     return;
   }
   eventLegendEl.innerHTML = "";
-  const order = ["person", "animal", "vehicle"];
+  const order = ["person", "animal", "vehicle", "motion"];
   for (const name of order) {
     if (!buckets.has(name)) continue;
     const dot = document.createElement("span");

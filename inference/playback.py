@@ -19,6 +19,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import sqlite3
 import tempfile
 import threading
 import uuid
@@ -42,7 +44,55 @@ def _parse_iso_to_unix(s: str) -> float:
     return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
 
 
-async def stream_playback(cam: str, start: str, duration: str, detector: Detector):
+def _parse_duration_to_seconds(s: str) -> int:
+    """Browser sends '<int>s' (e.g. '300s'). Accept that, plain int, or
+    bare ints in case the caller forgot the unit. Caller is internal-only."""
+    m = re.match(r"^(\d+)\s*s?$", s.strip())
+    if not m:
+        return 300
+    return int(m.group(1))
+
+
+def _load_motion_events(
+    db_path: Path, cam: str, window_start: float, window_end: float,
+) -> list[tuple[float, float, list[float], float]]:
+    """Motion events overlapping the playback window.
+
+    Returns ``[(ts_start, ts_end, [x1, y1, x2, y2], max_conf), ...]``.
+    Used to inject the stored peak_bbox as a static box into the
+    re-detection SSE stream — the playback worker only re-runs YOLO,
+    which doesn't know about motion. Without this, scrubbing past a
+    motion event with "Show labels" on shows nothing.
+    """
+    if not db_path.exists():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.OperationalError:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT ts_start, ts_end, peak_bbox, max_conf FROM events "
+            "WHERE camera = ? AND class = 'motion' "
+            "AND ts_end >= ? AND ts_start <= ?",
+            (cam, window_start, window_end),
+        ).fetchall()
+    finally:
+        conn.close()
+    out: list[tuple[float, float, list[float], float]] = []
+    for ts_start, ts_end, peak_bbox_json, max_conf in rows:
+        try:
+            bbox = json.loads(peak_bbox_json)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(bbox, list) and len(bbox) == 4:
+            out.append((float(ts_start), float(ts_end), bbox, float(max_conf)))
+    return out
+
+
+async def stream_playback(
+    cam: str, start: str, duration: str, detector: Detector, db_path: Path,
+):
     """Async generator yielding SSE bytes for every sampled frame in
     the requested playback window.
 
@@ -87,6 +137,14 @@ async def stream_playback(cam: str, start: str, duration: str, detector: Detecto
         queue: asyncio.Queue = asyncio.Queue(maxsize=64)
         stop_flag = threading.Event()
         start_unix = _parse_iso_to_unix(start)
+        duration_s = _parse_duration_to_seconds(duration)
+        # Stored motion events whose [ts_start, ts_end] overlaps the
+        # window. We re-emit their peak_bbox at every YOLO-sampled
+        # frame inside that range so "Show labels" surfaces motion in
+        # past mode the same way it does live.
+        motion_events = _load_motion_events(
+            db_path, cam, start_unix, start_unix + duration_s,
+        )
 
         def worker() -> None:
             try:
@@ -115,20 +173,25 @@ async def stream_playback(cam: str, start: str, duration: str, detector: Detecto
                                 queue.put_nowait, ("error", str(e))
                             )
                             return
-                        msg = {
-                            "ts": start_unix + frame_idx / fps,
-                            "boxes": [
-                                [
-                                    d.bbox[0],
-                                    d.bbox[1],
-                                    d.bbox[2],
-                                    d.bbox[3],
-                                    d.cls,
-                                    round(d.conf, 3),
-                                ]
-                                for d in dets
-                            ],
-                        }
+                        ts = start_unix + frame_idx / fps
+                        boxes = [
+                            [
+                                d.bbox[0],
+                                d.bbox[1],
+                                d.bbox[2],
+                                d.bbox[3],
+                                d.cls,
+                                round(d.conf, 3),
+                            ]
+                            for d in dets
+                        ]
+                        for ts_s, ts_e, bbox, max_conf in motion_events:
+                            if ts_s <= ts <= ts_e:
+                                boxes.append([
+                                    bbox[0], bbox[1], bbox[2], bbox[3],
+                                    "motion", round(max_conf, 3),
+                                ])
+                        msg = {"ts": ts, "boxes": boxes}
                         loop.call_soon_threadsafe(queue.put_nowait, ("data", msg))
                     frame_idx += 1
                 cap.release()
