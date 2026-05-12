@@ -232,8 +232,112 @@ function renderEventPips() {
     pip.addEventListener("click", () => {
       seekToTimestamp(ev.ts_start);
     });
+    pip.addEventListener("mouseenter", () => showPipPreview(pip, ev));
+    pip.addEventListener("mouseleave", hidePipPreview);
     eventPipsEl.appendChild(pip);
   }
+}
+
+// Hover-preview on a timeline pip: pops up the event's thumbnail with
+// its peak bounding box drawn over the image. The hairline-width pips
+// for short events are easy to miss; the preview lets the user mouse
+// down the timeline and see where in the frame to look.
+let pipPreviewEl = null;
+
+function ensurePipPreview() {
+  if (pipPreviewEl) return pipPreviewEl;
+  pipPreviewEl = document.createElement("div");
+  pipPreviewEl.id = "pip-preview";
+  pipPreviewEl.innerHTML =
+    '<div class="pip-preview-frame">' +
+      '<img alt="">' +
+      '<canvas></canvas>' +
+    '</div>' +
+    '<div class="pip-preview-meta"></div>';
+  document.body.appendChild(pipPreviewEl);
+  return pipPreviewEl;
+}
+
+function drawPipPreviewBox(canvas, ev, dispW, dispH) {
+  canvas.width = dispW;
+  canvas.height = dispH;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, dispW, dispH);
+  const b = ev.peak_bbox;
+  if (!Array.isArray(b) || b.length !== 4) return;
+  const x1 = b[0] * dispW, y1 = b[1] * dispH;
+  const x2 = b[2] * dispW, y2 = b[3] * dispH;
+  const w = x2 - x1, h = y2 - y1;
+  const color = pipColor(ev.class);
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = color;
+  if (ev.class === "motion") {
+    // Mirror overlay.js: dashed stroke, no label chip — motion has no
+    // class identity and the "confidence" is just blob-area fraction.
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(x1, y1, w, h);
+    ctx.setLineDash([]);
+    return;
+  }
+  ctx.strokeRect(x1, y1, w, h);
+  const label = `${ev.class} ${ev.max_conf.toFixed(2)}`;
+  ctx.font = "11px system-ui, sans-serif";
+  const padX = 4, padY = 2;
+  const chipW = ctx.measureText(label).width + padX * 2;
+  const chipH = 14;
+  let chipY = y1 - chipH - 2;
+  if (chipY < 0) chipY = y1 + 2;
+  ctx.fillStyle = color;
+  ctx.fillRect(x1, chipY, chipW, chipH);
+  ctx.fillStyle = "#000";
+  ctx.textBaseline = "top";
+  ctx.fillText(label, x1 + padX, chipY + padY);
+}
+
+function positionPipPreview(pipEl) {
+  if (!pipPreviewEl) return;
+  const r = pipEl.getBoundingClientRect();
+  const p = pipPreviewEl.getBoundingClientRect();
+  const pad = 8;
+  let left = r.left + r.width / 2 - p.width / 2;
+  left = Math.max(pad, Math.min(left, window.innerWidth - p.width - pad));
+  // Prefer above the pip so the preview doesn't cover the video below.
+  let top = r.top - p.height - pad;
+  if (top < pad) top = r.bottom + pad;
+  pipPreviewEl.style.left = `${left}px`;
+  pipPreviewEl.style.top = `${top}px`;
+}
+
+function showPipPreview(pipEl, ev) {
+  if (!ev.thumb_url) return;
+  const preview = ensurePipPreview();
+  const img = preview.querySelector("img");
+  const canvas = preview.querySelector("canvas");
+  const meta = preview.querySelector(".pip-preview-meta");
+  const tLabel = new Date(ev.ts_start * 1000).toLocaleTimeString();
+  meta.textContent = `${ev.class} · ${ev.camera} · ${tLabel}`
+    + ` · conf ${ev.max_conf.toFixed(2)}`;
+  // Render hidden first so layout can measure for positioning.
+  preview.style.visibility = "hidden";
+  preview.style.display = "block";
+  const setup = () => {
+    const dispW = img.clientWidth || img.naturalWidth;
+    const dispH = img.clientHeight || img.naturalHeight;
+    drawPipPreviewBox(canvas, ev, dispW, dispH);
+    positionPipPreview(pipEl);
+    preview.style.visibility = "visible";
+  };
+  if (img.complete && img.src.endsWith(ev.thumb_url)) {
+    setup();
+  } else {
+    img.onload = setup;
+    img.onerror = () => { preview.style.display = "none"; };
+    img.src = ev.thumb_url;
+  }
+}
+
+function hidePipPreview() {
+  if (pipPreviewEl) pipPreviewEl.style.display = "none";
 }
 
 function renderEventLegend() {

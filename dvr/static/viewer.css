@@ -336,6 +336,45 @@ main#playback {
   filter: brightness(1.3);
 }
 
+/* Floating preview popped up on event-pip hover. JS positions it above
+   the pip and draws the peak bbox + class label on the canvas layered
+   over the thumbnail. */
+#pip-preview {
+  position: fixed;
+  pointer-events: none;
+  z-index: 100;
+  background: #1a1c1f;
+  border: 1px solid #333;
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.6);
+  display: none;
+}
+#pip-preview .pip-preview-frame {
+  position: relative;
+  line-height: 0;
+}
+#pip-preview img {
+  display: block;
+  width: 320px;
+  height: auto;
+  border-radius: 4px 4px 0 0;
+}
+#pip-preview canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 320px;
+  height: auto;
+}
+#pip-preview .pip-preview-meta {
+  font: 11px/1.3 system-ui, -apple-system, sans-serif;
+  color: #ccc;
+  padding: 4px 6px;
+  background: #0e0f11;
+  border-radius: 0 0 4px 4px;
+  white-space: nowrap;
+}
+
 /* Cursor line connecting the scrubber thumb up to the availability bar.
    .timeline padding-top:0.5em + #availability height:6px = thumb-to-bar
    distance the line needs to span. */
