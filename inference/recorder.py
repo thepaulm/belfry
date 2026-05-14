@@ -44,6 +44,37 @@ logger = logging.getLogger("belfry.inference.recorder")
 
 _SCHEMA_FILE = Path(__file__).parent / "schema.sql"
 
+# BGR for OpenCV; mirrors the live overlay's CLASS_COLOR so a baked-in
+# rectangle matches the pip colour scheme on the playback and events pages.
+_THUMB_BOX_COLOR = {
+    "person":  (255, 161, 78),
+    "animal":  (124, 209, 90),
+    "dog":     (124, 209, 90),
+    "cat":     (124, 209, 90),
+    "bird":    (124, 209, 90),
+    "vehicle": (63, 155, 255),
+    "car":     (63, 155, 255),
+    "truck":   (63, 155, 255),
+    "motion":  (249, 121, 232),
+}
+_THUMB_BOX_DEFAULT = (170, 170, 170)
+
+
+def draw_thumb_bbox(frame, bbox: tuple[float, float, float, float], cls: str) -> None:
+    """Draw the peak bbox in-place onto a frame about to be JPEG-encoded.
+
+    bbox is normalized 0..1 (x1, y1, x2, y2); we scale to frame size here so
+    callers don't need to know the source resolution.
+    """
+    h, w = frame.shape[:2]
+    x1 = max(0, min(w - 1, int(round(bbox[0] * w))))
+    y1 = max(0, min(h - 1, int(round(bbox[1] * h))))
+    x2 = max(0, min(w - 1, int(round(bbox[2] * w))))
+    y2 = max(0, min(h - 1, int(round(bbox[3] * h))))
+    color = _THUMB_BOX_COLOR.get(cls, _THUMB_BOX_DEFAULT)
+    thickness = max(2, h // 270)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
+
 
 @dataclass
 class _Run:
@@ -318,6 +349,7 @@ class EventRecorder:
             out_dir.mkdir(parents=True, exist_ok=True)
             fname = f"{run.ts_start:.3f}_{run.cls}.jpg"
             out_path = out_dir / fname
+            draw_thumb_bbox(run.peak_frame, run.peak_bbox, run.cls)
             cv2.imwrite(str(out_path), run.peak_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
             return str(out_path.relative_to(self.thumbs_dir))
         except Exception:

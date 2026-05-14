@@ -53,7 +53,7 @@ import cv2
 from dvr.config import Camera, Config, load_config
 from .model import Detection, Detector
 from .motion import MotionDetector
-from .recorder import init_db
+from .recorder import draw_thumb_bbox, init_db
 
 logger = logging.getLogger("belfry.inference.backfill")
 
@@ -122,6 +122,7 @@ def _save_thumb(thumbs_dir: Path, cam: str, run: _Run) -> str | None:
         out_dir = thumbs_dir / cam / day
         out_dir.mkdir(parents=True, exist_ok=True)
         out = out_dir / f"{run.ts_start:.3f}_{run.cls}.jpg"
+        draw_thumb_bbox(run.peak_frame, run.peak_bbox, run.cls)
         cv2.imwrite(str(out), run.peak_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
         return str(out.relative_to(thumbs_dir))
     except Exception:
