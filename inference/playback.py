@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 import sqlite3
 import tempfile
@@ -53,16 +54,25 @@ def _parse_duration_to_seconds(s: str) -> int:
     return int(m.group(1))
 
 
-def _load_motion_events(
+def _load_events_for_window(
     db_path: Path, cam: str, window_start: float, window_end: float,
-) -> list[tuple[float, float, list[float], float]]:
-    """Motion events overlapping the playback window.
+) -> list[tuple[float, float, str, list[float], float]]:
+    """All events overlapping the playback window.
 
-    Returns ``[(ts_start, ts_end, [x1, y1, x2, y2], max_conf), ...]``.
-    Used to inject the stored peak_bbox as a static box into the
-    re-detection SSE stream — the playback worker only re-runs YOLO,
-    which doesn't know about motion. Without this, scrubbing past a
-    motion event with "Show labels" on shows nothing.
+    Returns ``[(ts_start, ts_end, class, [x1, y1, x2, y2], max_conf), ...]``.
+    Used to inject the stored peak_bbox as a fallback into the
+    re-detection SSE stream. Two cases this covers:
+      * ``class='motion'`` — playback worker only re-runs YOLO and YOLO
+        doesn't know about motion, so without this, scrubbing past a
+        motion event with "Show labels" on shows nothing.
+      * YOLO classes — past re-inference samples at integer-second
+        offsets from the window start, while the live recorder samples
+        at arbitrary RTSP-arrival moments. A brief visit (e.g. a bird
+        flap of ~1 s) that the live recorder caught can fall entirely
+        between past inference's sample points and never re-detect.
+        Injecting the stored peak_bbox at sample frames where re-inference
+        didn't find the same class guarantees the user sees what the
+        live recorder caught.
     """
     if not db_path.exists():
         return []
@@ -72,21 +82,22 @@ def _load_motion_events(
         return []
     try:
         rows = conn.execute(
-            "SELECT ts_start, ts_end, peak_bbox, max_conf FROM events "
-            "WHERE camera = ? AND class = 'motion' "
-            "AND ts_end >= ? AND ts_start <= ?",
+            "SELECT ts_start, ts_end, class, peak_bbox, max_conf FROM events "
+            "WHERE camera = ? AND ts_end >= ? AND ts_start <= ?",
             (cam, window_start, window_end),
         ).fetchall()
     finally:
         conn.close()
-    out: list[tuple[float, float, list[float], float]] = []
-    for ts_start, ts_end, peak_bbox_json, max_conf in rows:
+    out: list[tuple[float, float, str, list[float], float]] = []
+    for ts_start, ts_end, cls, peak_bbox_json, max_conf in rows:
         try:
             bbox = json.loads(peak_bbox_json)
         except (TypeError, ValueError):
             continue
         if isinstance(bbox, list) and len(bbox) == 4:
-            out.append((float(ts_start), float(ts_end), bbox, float(max_conf)))
+            out.append(
+                (float(ts_start), float(ts_end), cls, bbox, float(max_conf))
+            )
     return out
 
 
@@ -138,12 +149,41 @@ async def stream_playback(
         stop_flag = threading.Event()
         start_unix = _parse_iso_to_unix(start)
         duration_s = _parse_duration_to_seconds(duration)
-        # Stored motion events whose [ts_start, ts_end] overlaps the
-        # window. We re-emit their peak_bbox at every YOLO-sampled
-        # frame inside that range so "Show labels" surfaces motion in
-        # past mode the same way it does live.
-        motion_events = _load_motion_events(
+        # Stored events whose [ts_start, ts_end] overlaps the window.
+        # We re-emit their peak_bbox at YOLO-sampled frames inside
+        # that range; for motion events always (YOLO doesn't know about
+        # motion); for YOLO classes only when re-inference at this
+        # frame didn't already find the same class — see
+        # _load_events_for_window for the rationale.
+        stored_events = _load_events_for_window(
             db_path, cam, start_unix, start_unix + duration_s,
+        )
+        # Events whose [ts_start, ts_end] range doesn't contain any
+        # integer-second sample emitted by the 1-fps worker. The
+        # smallest sample ts ≥ ts_start is ceil(ts_start) (samples land
+        # on start_unix + 0, +1, +2, … and start_unix is a whole
+        # second from the iso parser), so if ceil(ts_start) > ts_end
+        # the event range falls entirely between two worker samples
+        # and the per-frame injection loop below never fires for it.
+        # Most bird events are zero-duration (single-sample bursts at
+        # a fractional ts_start), so without this almost no bird ever
+        # shows in past playback. Emit a synthetic sample at ts_start
+        # for those events so the browser's closest-ts lookup has
+        # something to draw.
+        window_end = start_unix + duration_s
+        synthetic = sorted(
+            (
+                {
+                    "ts": max(ts_s, start_unix),
+                    "boxes": [[
+                        bbox[0], bbox[1], bbox[2], bbox[3],
+                        cls, round(max_conf, 3),
+                    ]],
+                }
+                for ts_s, ts_e, cls, bbox, max_conf in stored_events
+                if math.ceil(ts_s) > ts_e and ts_s <= window_end
+            ),
+            key=lambda m: m["ts"],
         )
 
         def worker() -> None:
@@ -160,6 +200,7 @@ async def stream_playback(
                 # every-frame if fps is unexpectedly low (avoids div-0).
                 sample_every = max(1, int(round(fps)))
                 frame_idx = 0
+                synth_idx = 0
                 while not stop_flag.is_set():
                     ok, frame = cap.read()
                     if not ok:
@@ -174,6 +215,18 @@ async def stream_playback(
                             )
                             return
                         ts = start_unix + frame_idx / fps
+                        # Flush any synthetic samples that come before
+                        # this regular sample so the SSE stream stays
+                        # chronological (the browser walks _pastSamples
+                        # backwards assuming sorted ascending).
+                        while (
+                            synth_idx < len(synthetic)
+                            and synthetic[synth_idx]["ts"] <= ts
+                        ):
+                            loop.call_soon_threadsafe(
+                                queue.put_nowait, ("data", synthetic[synth_idx])
+                            )
+                            synth_idx += 1
                         boxes = [
                             [
                                 d.bbox[0],
@@ -185,16 +238,32 @@ async def stream_playback(
                             ]
                             for d in dets
                         ]
-                        for ts_s, ts_e, bbox, max_conf in motion_events:
-                            if ts_s <= ts <= ts_e:
-                                boxes.append([
-                                    bbox[0], bbox[1], bbox[2], bbox[3],
-                                    "motion", round(max_conf, 3),
-                                ])
+                        detected_classes = {d.cls for d in dets}
+                        for ts_s, ts_e, cls, bbox, max_conf in stored_events:
+                            if not (ts_s <= ts <= ts_e):
+                                continue
+                            # YOLO classes only get the static fallback
+                            # if re-inference at this frame missed the
+                            # class. Motion is always emitted (no YOLO
+                            # equivalent to suppress against).
+                            if cls != "motion" and cls in detected_classes:
+                                continue
+                            boxes.append([
+                                bbox[0], bbox[1], bbox[2], bbox[3],
+                                cls, round(max_conf, 3),
+                            ])
                         msg = {"ts": ts, "boxes": boxes}
                         loop.call_soon_threadsafe(queue.put_nowait, ("data", msg))
                     frame_idx += 1
                 cap.release()
+                # Drain any synthetic samples whose ts is after the
+                # last real frame we decoded (e.g. an event right at
+                # the tail end of the window).
+                while synth_idx < len(synthetic):
+                    loop.call_soon_threadsafe(
+                        queue.put_nowait, ("data", synthetic[synth_idx])
+                    )
+                    synth_idx += 1
                 loop.call_soon_threadsafe(queue.put_nowait, ("done", None))
             except Exception as e:
                 logger.exception("playback worker crashed")
