@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'auth.dart';
-import 'home_screen.dart';
+import 'sets_screen.dart';
 import 'sign_in_screen.dart';
 
 void main() {
@@ -45,7 +45,7 @@ class _BelfryAppState extends State<BelfryApp> {
           }
           return _auth.session == null
               ? SignInScreen(auth: _auth)
-              : HomeScreen(auth: _auth);
+              : SetsScreen(auth: _auth);
         },
       ),
     );
