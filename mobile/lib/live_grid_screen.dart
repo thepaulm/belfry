@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
@@ -75,8 +77,17 @@ class _LiveTile extends StatefulWidget {
 }
 
 class _LiveTileState extends State<_LiveTile> {
+  static const _retryDelays = <Duration>[
+    Duration(seconds: 3),
+    Duration(seconds: 8),
+    Duration(seconds: 20),
+  ];
+
   VideoPlayerController? _controller;
   String? _error;
+  int _attempt = 0;
+  Timer? _retryTimer;
+  bool _disposed = false;
 
   @override
   void initState() {
@@ -90,6 +101,15 @@ class _LiveTileState extends State<_LiveTile> {
       // Camera disabled — no controller, the build() shows "OFFLINE".
       return;
     }
+
+    // Tear down any prior controller before re-attaching.
+    final prev = _controller;
+    _controller = null;
+    if (prev != null) {
+      prev.removeListener(_onControllerUpdate);
+      await prev.dispose();
+    }
+
     final c = VideoPlayerController.networkUrl(
       Uri.parse(hls),
       httpHeaders: ApiClient(widget.auth).bearerHeaders(),
@@ -98,19 +118,56 @@ class _LiveTileState extends State<_LiveTile> {
       await c.initialize();
       await c.setLooping(false);
       await c.play();
-      if (!mounted) {
+      if (_disposed) {
         await c.dispose();
         return;
       }
-      setState(() => _controller = c);
+      c.addListener(_onControllerUpdate);
+      if (mounted) {
+        setState(() {
+          _controller = c;
+          _error = null;
+          // Successful start — reset retry counter for future failures.
+          _attempt = 0;
+        });
+      }
     } catch (e) {
       await c.dispose();
-      if (mounted) setState(() => _error = e.toString());
+      _scheduleRetry(e.toString());
     }
+  }
+
+  void _onControllerUpdate() {
+    final c = _controller;
+    if (c == null || !c.value.hasError) return;
+    final reason = c.value.errorDescription ?? 'playback error';
+    c.removeListener(_onControllerUpdate);
+    unawaited(c.dispose());
+    _controller = null;
+    _scheduleRetry(reason);
+  }
+
+  void _scheduleRetry(String reason) {
+    if (_disposed) return;
+    if (_attempt >= _retryDelays.length) {
+      if (mounted) setState(() => _error = reason);
+      return;
+    }
+    final delay = _retryDelays[_attempt];
+    _attempt += 1;
+    if (mounted) setState(() => _error = reason);
+    _retryTimer?.cancel();
+    _retryTimer = Timer(delay, () {
+      if (_disposed) return;
+      _initController();
+    });
   }
 
   @override
   void dispose() {
+    _disposed = true;
+    _retryTimer?.cancel();
+    _controller?.removeListener(_onControllerUpdate);
     _controller?.dispose();
     super.dispose();
   }

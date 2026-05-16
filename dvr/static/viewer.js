@@ -72,15 +72,38 @@ function attach(cam, attempt = 0) {
     clearTimeout(entry.reattachTimer);
     entry.reattachTimer = null;
   }
+  if (entry.cleanup) {
+    entry.cleanup();
+    entry.cleanup = null;
+  }
 
   if (!cam.hls_url) {
     setState(tile, "disabled");
     return;
   }
 
+  const scheduleRetry = () => {
+    setState(tile, "offline");
+    const delay = REATTACH_DELAYS_MS[attempt];
+    if (delay === undefined) return;
+    entry.reattachTimer = setTimeout(() => {
+      entry.reattachTimer = null;
+      attach(cam, attempt + 1);
+    }, delay);
+  };
+
   if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    // Native HLS (Safari/iOS) — retry rides on the <video> error event.
     video.src = cam.hls_url;
     video.play().catch(() => {});
+    const onError = () => scheduleRetry();
+    const onPlaying = () => { attempt = 0; };
+    video.addEventListener("error", onError);
+    video.addEventListener("playing", onPlaying);
+    entry.cleanup = () => {
+      video.removeEventListener("error", onError);
+      video.removeEventListener("playing", onPlaying);
+    };
   } else if (window.Hls && Hls.isSupported()) {
     const hls = new Hls({
       lowLatencyMode: true,
@@ -98,16 +121,7 @@ function attach(cam, attempt = 0) {
       if (!data.fatal) return;
       hls.destroy();
       entry.hls = null;
-      const delay = REATTACH_DELAYS_MS[attempt];
-      if (delay !== undefined) {
-        setState(tile, "offline");
-        entry.reattachTimer = setTimeout(() => {
-          entry.reattachTimer = null;
-          attach(cam, attempt + 1);
-        }, delay);
-      } else {
-        setState(tile, "offline");
-      }
+      scheduleRetry();
     });
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
       // Successful start — reset attempt counter for any future failures.
