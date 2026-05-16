@@ -10,9 +10,10 @@ from hashlib import sha1
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 
+from . import auth
 from .config import Camera, CameraSet, load_config
 from .health import probe_all
 from .retention import RetentionLoop
@@ -82,6 +83,41 @@ async def api_set_health(set_id: str) -> list[dict]:
 @app.get("/api/retention/status")
 async def api_retention_status() -> dict:
     return retention_loop.status_dict()
+
+
+# --- mobile-app auth ---------------------------------------------------
+# /auth/exchange takes a Google ID token from the Flutter google_sign_in
+# plugin and returns a 30-day server JWT. /auth/verify is the forward_auth
+# target Caddy on EC2 will call when a request carries Authorization:
+# Bearer — bare 200/401 plus an X-Auth-Email header for downstream logs.
+# Neither endpoint gates anything else here; Caddy is the WAN gate, LAN
+# stays open by network position. See dvr/auth.py for the trust model.
+
+
+@app.post("/auth/exchange")
+async def auth_exchange(body: dict) -> dict:
+    token = body.get("id_token")
+    if not isinstance(token, str) or not token:
+        raise HTTPException(status_code=400, detail="missing id_token")
+    try:
+        email = auth.verify_google_id_token(token)
+    except auth.AuthError as e:
+        # Config errors (missing env) and verification failures both land
+        # here; 401 vs 503 doesn't help the app, just pass the message
+        # through. The app surfaces a generic "sign-in failed" anyway.
+        raise HTTPException(status_code=401, detail=str(e))
+    jwt_str, exp = auth.mint_jwt(email)
+    return {"token": jwt_str, "email": email, "expires_at": exp}
+
+
+@app.get("/auth/verify")
+async def auth_verify(request: Request) -> JSONResponse:
+    try:
+        bearer = auth.extract_bearer(request.headers.get("authorization"))
+        email = auth.verify_jwt(bearer)
+    except auth.AuthError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    return JSONResponse({"email": email}, headers={"X-Auth-Email": email})
 
 
 # --- inference events --------------------------------------------------

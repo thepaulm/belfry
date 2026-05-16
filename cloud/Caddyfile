@@ -5,6 +5,45 @@ yellowchicken.io {
 		reverse_proxy 127.0.0.1:4180
 	}
 
+	# /auth/exchange is the bootstrap for the mobile app's bearer auth: a
+	# POST of a Google ID token returns a server JWT. The Flutter app
+	# calls this before it has a JWT to send, so it has to be reachable
+	# without any auth gate. The endpoint itself verifies the Google ID
+	# token against Google's JWKS, checks `aud` against an allow-list of
+	# our own client IDs, and checks the email against
+	# /etc/belfry/allowed-emails — so this is effectively gated by "you
+	# must hold a real Google session for an allow-listed email signed
+	# for one of our client IDs", not nothing.
+	handle /auth/exchange {
+		reverse_proxy 127.0.0.1:8080 {
+			transport http {
+				read_timeout 60s
+				write_timeout 60s
+			}
+		}
+	}
+
+	# Bearer-tagged requests come from the mobile app. forward_auth to
+	# /auth/verify on the Orin (through the tunnel) — that endpoint
+	# validates the JWT and returns 200 + X-Auth-Email or 401. We do NOT
+	# rewrite 401 into a Google redirect here (unlike the cookie path
+	# below): an app that gets 401 should surface "session expired" and
+	# walk the user back through Google sign-in, not follow a 302 into
+	# a browser flow it can't render.
+	@bearer header Authorization "Bearer *"
+	handle @bearer {
+		forward_auth 127.0.0.1:8080 {
+			uri /auth/verify
+			copy_headers X-Auth-Email
+		}
+		reverse_proxy 127.0.0.1:8080 {
+			transport http {
+				read_timeout 300s
+				write_timeout 300s
+			}
+		}
+	}
+
 	# Everything else: gate via oauth2-proxy, then proxy to the reverse-SSH
 	# tunnel into the Orin. forward_auth's default behavior is to copy the
 	# auth provider's response (a 401 with body) straight back to the
