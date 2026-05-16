@@ -10,6 +10,10 @@ dependencies = [
     "pyyaml>=6.0",
     "pyjwt>=2.9",
     "google-auth>=2.35",
+    # google.auth.transport.requests (used to fetch Google's JWKS in
+    # dvr/auth.py) requires the `requests` library — google-auth ships
+    # transports as opt-in extras, not transitive deps.
+    "requests>=2.32",
 ]
 
 # Inference deps live in their own extras group because they require a
