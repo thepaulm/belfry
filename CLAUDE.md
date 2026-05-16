@@ -68,6 +68,14 @@ The reverse SSH tunnel runs on the **Orin**, outbound to EC2 (autossh, `belfry-t
 
 Auth model: there is no FastAPI-level auth. Caddy + oauth2-proxy gates the public path; LAN is trusted by network position. Removing the previous HTTP Basic layer eliminated the duplicate password popup once OAuth landed.
 
+## Adding a user
+
+A user's Google email has to be allow-listed in three places — there's no central source, so all three are kept in sync by hand:
+
+1. **EC2** — `/etc/oauth2-proxy/emails`, one email per line. Gates the web frontdoor; oauth2-proxy reads it live, no restart needed.
+2. **Orin** — `/etc/belfry/allowed-emails`, one email per line. Gates the mobile app's `/auth/exchange` JWT-mint endpoint. Read once at FastAPI startup, so `sudo systemctl restart belfry` after editing.
+3. **Google Cloud Console** — the OAuth consent screen's "Test users" list (project name `yellowchicken.io`, since the app is in Testing mode and not verified). Without this Google blocks the sign-in flow itself, before the email ever reaches our allow-lists.
+
 ## Cameras and sets
 
 8 cameras total. 7 live on the isolated camera subnet `192.168.254.0/24`; cam12 lives at `192.168.1.70` on the LAN subnet (a re-IP via the camera UI didn't take). To reach cam12 from the box, `192.168.1.50/24` is a persistent secondary address on `eno1` via NetworkManager (`nmcli connection modify "Wired connection 1" +ipv4.addresses 192.168.1.50/24`).

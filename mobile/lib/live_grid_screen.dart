@@ -178,8 +178,8 @@ class _LiveTileState extends State<_LiveTile> {
       onTap: () => Navigator.of(context).push(
         MaterialPageRoute(
           builder: (_) => PlaybackScreen(
-            cameraName: widget.camera.name,
-            cameraLabel: widget.camera.label,
+            auth: widget.auth,
+            camera: widget.camera,
           ),
         ),
       ),

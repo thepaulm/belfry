@@ -47,6 +47,24 @@ class Camera {
   );
 }
 
+class PlaybackRange {
+  PlaybackRange({required this.start, required this.duration});
+
+  // start is an ISO-8601 timestamp from MediaMTX. duration is seconds as a
+  // JSON number (MediaMTX emits fractional float seconds).
+  final DateTime start;
+  final Duration duration;
+
+  DateTime get end => start.add(duration);
+
+  factory PlaybackRange.fromJson(Map<String, dynamic> j) => PlaybackRange(
+    start: DateTime.parse(j['start'] as String),
+    duration: Duration(
+      microseconds: ((j['duration'] as num).toDouble() * 1e6).round(),
+    ),
+  );
+}
+
 class ApiException implements Exception {
   ApiException(this.statusCode, this.message);
   final int statusCode;
@@ -67,6 +85,25 @@ class ApiClient {
   Future<List<Camera>> getSetCameras(String setId) async {
     final body = await _getJson('/api/sets/$setId/cameras');
     return (body as List).map((e) => Camera.fromJson(e)).toList();
+  }
+
+  Future<List<PlaybackRange>> getPlaybackList(String cam) async {
+    final body = await _getJson('/api/playback/list?cam=$cam');
+    return (body as List).map((e) => PlaybackRange.fromJson(e)).toList();
+  }
+
+  // The video_player package handles the mp4 fetch itself — we just hand it
+  // the URL and the bearer header. Duration is rendered the same way MediaMTX
+  // expects it on the wire: "<seconds>s".
+  Uri playbackMp4Uri(String cam, DateTime start, Duration duration) {
+    final secs = (duration.inMicroseconds / 1e6);
+    return Uri.parse('${AppConfig.backendBase}/api/playback/get').replace(
+      queryParameters: {
+        'cam': cam,
+        'start': start.toUtc().toIso8601String(),
+        'duration': '${secs}s',
+      },
+    );
   }
 
   // The bearer headers map that callers (notably the VideoPlayer
