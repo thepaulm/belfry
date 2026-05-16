@@ -43,3 +43,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Per-developer build config (Google OAuth Web client ID, future
+# dart-define values). See env.example.json for schema.
+env.json
