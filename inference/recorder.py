@@ -173,9 +173,19 @@ class EventRecorder:
             self._db = None
 
     def _open_capture(self):
-        # FFmpeg backend is more reliable for RTSP than the default on
-        # Jetson; if it's not available cv2 will fall back internally.
-        cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+        # Bound the open and per-read syscalls so an RTSP outage can't
+        # wedge the drain thread forever. After a MediaMTX restart on
+        # 2026-05-16 all 8 drain threads got stuck inside this open call
+        # and stopped producing frames for ~27h without a single log line.
+        params = [
+            cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
+            cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000,
+        ]
+        try:
+            cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG, params)
+        except Exception:
+            logger.exception("VideoCapture raised opening %s", self.rtsp_url)
+            return None
         if not cap.isOpened():
             logger.error("could not open %s", self.rtsp_url)
             return None
@@ -194,29 +204,38 @@ class EventRecorder:
     # stream stays clean even when inference takes a moment.
 
     def _drain(self) -> None:
+        # Any exception inside this loop would silently kill the drain
+        # thread, after which the inference loop just keeps skipping
+        # ticks forever. The outer try-except keeps that from happening.
         while not self._drain_stop.is_set():
-            cap = self._cap
-            if cap is None:
-                # Brief gap while reopen runs; don't busy-spin.
-                time.sleep(0.5)
-                continue
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                logger.warning("drain: read failed on %s; reopening", self.camera_name)
-                self._cap = None
-                cap.release()
-                # Sleep then reopen. The inference loop will see None
-                # frames in the meantime and just skip its tick.
-                time.sleep(2.0)
-                new_cap = self._open_capture()
-                if new_cap is None:
-                    # Capture is gone for good; signal main loop by
-                    # leaving self._cap = None. We'll keep retrying.
+            try:
+                cap = self._cap
+                if cap is None:
+                    # Brief gap while reopen runs; don't busy-spin.
+                    time.sleep(0.5)
                     continue
-                self._cap = new_cap
-                continue
-            with self._latest_lock:
-                self._latest = (frame, time.time())
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    logger.warning("drain: read failed on %s; reopening", self.camera_name)
+                    self._cap = None
+                    cap.release()
+                    # Sleep then reopen. The inference loop will see None
+                    # frames in the meantime and just skip its tick.
+                    time.sleep(2.0)
+                    new_cap = self._open_capture()
+                    if new_cap is None:
+                        # Capture is gone for now; leave self._cap = None
+                        # and let the next loop iteration retry after the
+                        # 0.5s sleep above.
+                        continue
+                    self._cap = new_cap
+                    continue
+                with self._latest_lock:
+                    self._latest = (frame, time.time())
+            except Exception:
+                logger.exception("drain: unexpected error on %s; will retry", self.camera_name)
+                self._cap = None
+                time.sleep(2.0)
 
     def _loop(self, stop_check) -> None:
         next_tick = time.monotonic()
