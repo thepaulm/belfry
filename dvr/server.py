@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime
 import json
 import os
+import re
 import sqlite3
+import time
 import uuid
 from hashlib import sha1
 from pathlib import Path
@@ -444,6 +447,54 @@ async def api_playback_get(
         os.utime(cache_path, None)
 
     return FileResponse(cache_path, media_type="video/mp4")
+
+
+# --- training-image capture --------------------------------------------
+# Saves JPEG frames grabbed from the playback <video> element so the
+# detector can later be fine-tuned on real footage (e.g. deer in the
+# yard, plus negative "this wall edge is NOT a person" examples).
+# Frames are stored outside the repo at _TRAINING_DATA_ROOT under a
+# per-category subdir; labels are added later via an external tool.
+
+_TRAINING_DATA_ROOT = Path("/home/paulm/belfry-training")
+_CATEGORY_RE = re.compile(r"^[a-z0-9_-]+$")
+
+
+@app.post("/api/training/capture")
+async def api_training_capture(
+    request: Request,
+    cam: str,
+    class_name: str,
+    negative: bool = False,
+    ts: float | None = None,
+) -> dict:
+    if cam not in {c.name for c in config.all_cameras}:
+        raise HTTPException(status_code=404, detail=f"unknown camera: {cam}")
+    cls = class_name.strip().lower().replace(" ", "_")
+    if not _CATEGORY_RE.fullmatch(cls):
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid class_name: {class_name!r} (allowed: a-z 0-9 _ -)",
+        )
+    category = f"negative_{cls}" if negative else cls
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="empty image body")
+    if body[:2] != b"\xff\xd8":
+        raise HTTPException(status_code=400, detail="expected JPEG body (FFD8 SOI)")
+    ts_label = ts if ts is not None else time.time()
+    stamp = datetime.datetime.fromtimestamp(ts_label).strftime("%Y%m%dT%H%M%S")
+    target_dir = _TRAINING_DATA_ROOT / category
+    target_dir.mkdir(parents=True, exist_ok=True)
+    fname = f"{cam}_{stamp}_{uuid.uuid4().hex[:8]}.jpg"
+    target = target_dir / fname
+    target.write_bytes(body)
+    return {
+        "path": str(target),
+        "category": category,
+        "filename": fname,
+        "bytes": len(body),
+    }
 
 
 @app.get("/")

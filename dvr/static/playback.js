@@ -32,6 +32,15 @@ const scale5MinBtn = document.getElementById("scale-5min");
 const prevSliceBtn = document.getElementById("prev-slice");
 const nextSliceBtn = document.getElementById("next-slice");
 const sliceLabel = document.getElementById("slice-label");
+const captureBtn = document.getElementById("capture-btn");
+const captureModal = document.getElementById("capture-modal");
+const captureCanvas = document.getElementById("capture-canvas");
+const captureClassInput = document.getElementById("capture-class");
+const captureNegativeInput = document.getElementById("capture-negative");
+const captureMetaEl = document.getElementById("capture-meta");
+const captureSaveBtn = document.getElementById("capture-save");
+const captureCancelBtn = document.getElementById("capture-cancel");
+const captureStatusEl = document.getElementById("capture-status");
 
 if (SET_ID && CAM) {
   backLink.href = `/sets/${encodeURIComponent(SET_ID)}`;
@@ -767,6 +776,153 @@ function seekToTimestamp(ts) {
   loadWindow();
 }
 
+// ---------- training-image capture ----------
+// Grabs the currently-painted frame off the <video> element, posts the
+// JPEG to /api/training/capture, files it under <class> (or
+// negative_<class> if the checkbox is on). Overlay canvas isn't part
+// of the grab — drawImage(player) pulls pixels from the media element
+// only, so training images are box-free regardless of the labels
+// toggle state.
+
+let captureBlob = null;
+let captureTs = null;
+
+function captureTimestamp() {
+  // Best-effort absolute unix-epoch for the captured frame: in past
+  // mode the loaded window's start plus video.currentTime; in live
+  // mode just now. Used only for the saved filename — the capture is
+  // still well-defined if this is approximate.
+  if (mode === "live") return Date.now() / 1000;
+  if (pastLoadStartOffsetSec == null) return Date.now() / 1000;
+  const dayStart = selectedDayStart();
+  return dayStart.getTime() / 1000 + pastLoadStartOffsetSec + (player.currentTime || 0);
+}
+
+function grabCurrentFrame() {
+  // Returns a Promise<Blob|null>. Pauses playback first so what the
+  // user sees in the modal preview matches what gets saved.
+  if (player.readyState < 2 || !player.videoWidth) return Promise.resolve(null);
+  player.pause();
+  captureCanvas.width = player.videoWidth;
+  captureCanvas.height = player.videoHeight;
+  const ctx = captureCanvas.getContext("2d");
+  ctx.drawImage(player, 0, 0, captureCanvas.width, captureCanvas.height);
+  return new Promise((resolve) => {
+    captureCanvas.toBlob((b) => resolve(b), "image/jpeg", 0.92);
+  });
+}
+
+async function openCaptureModal() {
+  captureStatusEl.textContent = "";
+  const blob = await grabCurrentFrame();
+  if (!blob) {
+    statusPill.textContent = "no frame to capture (video not loaded)";
+    return;
+  }
+  captureBlob = blob;
+  captureTs = captureTimestamp();
+  const tsLabel = new Date(captureTs * 1000).toLocaleString();
+  captureMetaEl.textContent = `${CAM} · ${tsLabel} · ${Math.round(blob.size / 1024)} KB`;
+  captureModal.hidden = false;
+  // Don't clobber the class field if the user is iterating on captures
+  // of the same class — leave whatever was there last time. Just put
+  // focus + select so they can overtype.
+  captureClassInput.focus();
+  captureClassInput.select();
+}
+
+function closeCaptureModal() {
+  captureModal.hidden = true;
+  captureBlob = null;
+  captureTs = null;
+}
+
+async function saveCapture() {
+  const cls = captureClassInput.value.trim().toLowerCase().replace(/\s+/g, "_");
+  if (!cls) {
+    captureStatusEl.textContent = "class is required";
+    return;
+  }
+  if (!captureBlob) {
+    captureStatusEl.textContent = "no image to save";
+    return;
+  }
+  const params = new URLSearchParams();
+  params.set("cam", CAM);
+  params.set("class_name", cls);
+  params.set("negative", captureNegativeInput.checked ? "true" : "false");
+  if (captureTs != null) params.set("ts", String(captureTs));
+  captureSaveBtn.disabled = true;
+  captureStatusEl.textContent = "Saving…";
+  try {
+    const r = await fetch(`/api/training/capture?${params.toString()}`, {
+      method: "POST",
+      body: captureBlob,
+      headers: { "Content-Type": "image/jpeg" },
+      credentials: "same-origin",
+    });
+    if (!r.ok) {
+      const txt = await r.text();
+      captureStatusEl.textContent = `save failed: ${r.status} ${txt}`;
+      return;
+    }
+    const j = await r.json();
+    statusPill.textContent = `saved → ${j.category}/${j.filename}`;
+    closeCaptureModal();
+  } catch (e) {
+    captureStatusEl.textContent = `save failed: ${e.message}`;
+  } finally {
+    captureSaveBtn.disabled = false;
+  }
+}
+
+function wireCaptureUI() {
+  captureBtn.addEventListener("click", openCaptureModal);
+  captureCancelBtn.addEventListener("click", closeCaptureModal);
+  captureSaveBtn.addEventListener("click", saveCapture);
+  // Click the backdrop to dismiss (but not clicks inside the modal-content).
+  captureModal.addEventListener("click", (e) => {
+    if (e.target === captureModal || e.target.classList.contains("modal-backdrop")) {
+      closeCaptureModal();
+    }
+  });
+  captureClassInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); saveCapture(); }
+  });
+  window.addEventListener("keydown", (e) => {
+    if (!captureModal.hidden) {
+      if (e.key === "Escape") { closeCaptureModal(); }
+      return;
+    }
+    // 'c' shortcut to open — only when not focused on a text input/select.
+    if ((e.key === "c" || e.key === "C") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "TEXTAREA")) return;
+      e.preventDefault();
+      openCaptureModal();
+    }
+  });
+}
+
+function maybeAutoOpenCapture() {
+  // Deep-link from /events: ?capture=1 auto-opens the modal once a
+  // frame is decoded. We listen once on whichever event fires first
+  // (loadeddata after first decode, or seeked if the seek to ?ts=
+  // hasn't completed yet) and add a short delay so the seeked frame
+  // is what gets painted, not the initial keyframe.
+  if (new URLSearchParams(window.location.search).get("capture") !== "1") return;
+  let fired = false;
+  const tryOpen = () => {
+    if (fired) return;
+    if (player.readyState < 2 || !player.videoWidth) return;
+    fired = true;
+    player.removeEventListener("loadeddata", tryOpen);
+    player.removeEventListener("seeked", tryOpen);
+    setTimeout(openCaptureModal, 250);
+  };
+  player.addEventListener("loadeddata", tryOpen);
+  player.addEventListener("seeked", tryOpen);
+}
+
 function init() {
   if (!SET_ID || !CAM) {
     statusPill.textContent = "bad URL";
@@ -857,6 +1013,8 @@ function init() {
   setInterval(refreshAvailability, 15000);
   updateCursor();
   updateGoLiveBtn();
+  wireCaptureUI();
+  maybeAutoOpenCapture();
   refreshAvailability();
   // Honor ?ts=<unix epoch> deep-links from /events. Default to live
   // when not present — opening playback with the slider parked at

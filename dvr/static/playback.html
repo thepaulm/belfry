@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>belfry · playback</title>
-  <link rel="stylesheet" href="/static/viewer.css?v=20">
+  <link rel="stylesheet" href="/static/viewer.css?v=21">
   <script defer src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
   <script defer src="/static/overlay.js?v=5"></script>
-  <script defer src="/static/playback.js?v=26"></script>
+  <script defer src="/static/playback.js?v=27"></script>
 </head>
 <body class="playback-body">
   <header>
@@ -30,6 +30,7 @@
         <button id="go-live" type="button">● Go Live</button>
         <button id="prev-event" type="button" title="Previous event ([)">◀ event</button>
         <button id="next-event" type="button" title="Next event (])">event ▶</button>
+        <button id="capture-btn" type="button" title="Capture training image (C)">📷 Capture</button>
         <span id="event-legend" class="muted"></span>
         <span id="window-label" class="muted"></span>
       </div>
@@ -59,5 +60,44 @@
       </div>
     </div>
   </main>
+
+  <div id="capture-modal" class="modal" hidden>
+    <div class="modal-backdrop"></div>
+    <div class="modal-content">
+      <h3>Capture training image</h3>
+      <div class="capture-preview">
+        <canvas id="capture-canvas"></canvas>
+      </div>
+      <div class="capture-form">
+        <label class="capture-field">
+          <span>Class</span>
+          <input id="capture-class" type="text" list="capture-class-list"
+                 autocomplete="off" spellcheck="false" placeholder="e.g. deer, person, raccoon">
+        </label>
+        <datalist id="capture-class-list">
+          <option value="person"></option>
+          <option value="dog"></option>
+          <option value="cat"></option>
+          <option value="bird"></option>
+          <option value="car"></option>
+          <option value="truck"></option>
+          <option value="deer"></option>
+          <option value="raccoon"></option>
+          <option value="coyote"></option>
+          <option value="fox"></option>
+        </datalist>
+        <label class="capture-field-inline">
+          <input id="capture-negative" type="checkbox">
+          <span>Negative example (this is NOT a …)</span>
+        </label>
+        <div class="capture-meta muted" id="capture-meta"></div>
+        <div class="modal-buttons">
+          <button id="capture-cancel" type="button">Cancel</button>
+          <button id="capture-save" type="button" class="primary">Save</button>
+        </div>
+        <span id="capture-status" class="muted"></span>
+      </div>
+    </div>
+  </div>
 </body>
 </html>

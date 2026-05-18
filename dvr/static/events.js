@@ -140,6 +140,22 @@ function renderEvents(events) {
       a.removeAttribute("href");
     }
     a.dataset.cls = ev.class;
+    // Capture button: navigates to playback with ?capture=1 so the
+    // capture modal auto-opens once the video has decoded the seek-
+    // target frame. stopPropagation so clicking it doesn't also fire
+    // the parent <a>'s navigation (which would land us at playback
+    // without the capture flag).
+    const captureBtn = node.querySelector(".event-capture-link");
+    if (setId) {
+      captureBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        window.location.href =
+          `/sets/${setId}/${ev.camera}/playback?ts=${ev.ts_start}&capture=1`;
+      });
+    } else {
+      captureBtn.remove();
+    }
     if (ev.thumb_url) {
       const img = node.querySelector(".event-thumb");
       img.src = ev.thumb_url;
