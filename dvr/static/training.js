@@ -62,14 +62,17 @@ const els = {
 };
 
 const state = {
-  classes: [],           // id_to_name
-  allImages: [],         // [{category, filename, has_label, cam, ts}]
+  // Sparse COCO-aligned ids: [{id: 0, name: "person"}, {id: 2, name: "car"}, …]
+  // Array index ≠ class id, so always read .id / .name explicitly.
+  classes: [],
+  classNameById: {},     // {0: "person", 2: "car", …} — fast lookup in draw()
+  allImages: [],         // [{location, category, filename, has_label, cam, ts}]
   filtered: [],          // current filter result
   currentIdx: -1,        // index into filtered
   boxes: [],             // current image's boxes; normalized
   selectedBox: -1,
   dirty: false,
-  newBoxClassId: 0,
+  newBoxClassId: 0,      // real class id, not an array index
   filter: { categories: new Set(), state: "all" },  // empty cats = all
   // Pointer interaction
   drag: null,            // {mode: "draw"|"move"|"resize", ...}
@@ -321,10 +324,10 @@ async function loadAt(idx) {
   // hint is a positive staging class. Promoted images and negative
   // folders carry no implied class for *new* boxes — leave as-is.
   if (im.location === "staging" && im.category && !im.category.startsWith("negative_")) {
-    const guessId = state.classes.indexOf(im.category);
-    if (guessId >= 0) {
-      state.newBoxClassId = guessId;
-      els.newBoxClass.value = String(guessId);
+    const guess = state.classes.find(c => c.name === im.category);
+    if (guess) {
+      state.newBoxClassId = guess.id;
+      els.newBoxClass.value = String(guess.id);
     }
   }
 
@@ -364,7 +367,7 @@ function sizeCanvas() {
 // ---------- Drawing ----------
 
 function classNameOf(cls_id) {
-  return state.classes[cls_id] || `cls${cls_id}`;
+  return state.classNameById[cls_id] || `cls${cls_id}`;
 }
 
 function drawCanvas() {
@@ -572,12 +575,12 @@ function updateHoverCursor(p) {
 function populateClassDropdowns() {
   for (const sel of [els.newBoxClass, els.selClass]) {
     sel.innerHTML = "";
-    state.classes.forEach((name, id) => {
+    for (const { id, name } of state.classes) {
       const opt = document.createElement("option");
       opt.value = String(id);
       opt.textContent = `${id}: ${name}`;
       sel.appendChild(opt);
-    });
+    }
   }
   els.newBoxClass.value = String(state.newBoxClassId);
 }
@@ -792,7 +795,11 @@ async function init() {
   try {
     const data = await fetchStaging();
     state.classes = data.classes || [];
+    state.classNameById = Object.fromEntries(state.classes.map(c => [c.id, c.name]));
     state.allImages = data.images || [];
+    // Default new-box id to the first class in the list (id 0 = person
+    // under the COCO-aligned scheme — sensible default for our cams).
+    if (state.classes.length) state.newBoxClassId = state.classes[0].id;
     populateClassDropdowns();
     renderCategoryChips();
     applyFilter();

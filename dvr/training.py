@@ -1,17 +1,16 @@
 """Training-data staging helpers for the /api/training/capture endpoint
-and the promote-labeled script.
+and the labeler.
 
 Layout:
 
     /home/paulm/belfry-training/
-        dataset.yaml           # Ultralytics dataset spec (source of truth
-                               # for class name ↔ id mapping)
+        dataset.yaml           # Ultralytics dataset spec — source of truth
+                               # for class id ↔ name (COCO-aligned sparse ids)
         staging/
             <class>/           # human-flagged class hint
                 cam5_…jpg
                 cam5_…txt      # pre-seeded boxes if events.db had them;
-                               # absent until labelImg saves
-                classes.txt    # labelImg's per-dir class list
+                               # absent until the labeler saves
             negative_<class>/  # hard-negative for <class>
                 …
         images/                # promoted, in the training set
@@ -22,6 +21,11 @@ Three unambiguous states:
     staging/<class>/foo.jpg          → captured, awaiting human review
     staging/<class>/foo.jpg + .txt   → reviewed, ready to promote
     images/foo.jpg + labels/foo.txt  → in the training set
+
+Class ids are COCO-aligned (sparse 0, 2, 7, 14, 15, 16, 80, …) so a
+future fine-tune can extend YOLO11l's head from 80 → 80+N outputs
+and weight-transfer the pretrained channels for the existing
+classes verbatim.
 """
 
 from __future__ import annotations
@@ -36,27 +40,30 @@ IMAGES_DIR = TRAINING_ROOT / "images"
 LABELS_DIR = TRAINING_ROOT / "labels"
 DATASET_YAML = TRAINING_ROOT / "dataset.yaml"
 
-# Source of truth for class id ↔ name. Edit dataset.yaml on disk to add
-# classes; we read from there at runtime. This default is written on
-# first capture if the file doesn't exist yet.
-#
-# Ordering: COCO subset that YOLO11l already knows about (so events.db
-# pre-seed boxes round-trip cleanly into the same ids), followed by
-# fine-tune-only classes that the base model has no concept of.
-_DEFAULT_CLASS_NAMES = [
-    "person",   # 0
-    "dog",      # 1
-    "cat",      # 2
-    "bird",     # 3
-    "car",      # 4
-    "truck",    # 5
-    "deer",     # 6 — wildlife fine-tune target, not in base YOLO11l
+# Defaults written into dataset.yaml when it doesn't exist yet. Sparse
+# COCO-aligned ids — see the module docstring for the why. Edit
+# dataset.yaml on disk to add classes; we always read from there at
+# runtime, so this list is *only* the seed for a fresh install.
+_DEFAULT_CLASSES: list[tuple[int, str]] = [
+    (0,  "person"),
+    (2,  "car"),
+    (7,  "truck"),
+    (14, "bird"),
+    (15, "cat"),
+    (16, "dog"),
+    (80, "deer"),
+    (81, "coyote"),
+    (82, "raccoon"),
 ]
 
 _DATASET_YAML_TEMPLATE = """\
 # Belfry fine-tune dataset spec (Ultralytics format).
-# Source of truth for class id ↔ name; edit here, then re-run any
-# captures that should be re-seeded.
+# Source of truth for class id ↔ name.
+#
+# IDs are COCO-aligned (not dense 0..N) so a future fine-tune can extend
+# YOLO11l's head from 80 → 80+N outputs and weight-transfer the
+# pretrained channels for the existing classes verbatim. Sparse ids are
+# fine for Ultralytics — it skips unused slots during training.
 
 path: {root}
 train: images
@@ -74,19 +81,28 @@ def ensure_dataset_yaml() -> None:
     if DATASET_YAML.exists():
         return
     names_block = "\n".join(
-        f"  {i}: {name}" for i, name in enumerate(_DEFAULT_CLASS_NAMES)
+        f"  {cid}: {name}" for cid, name in _DEFAULT_CLASSES
     )
     DATASET_YAML.write_text(
         _DATASET_YAML_TEMPLATE.format(root=TRAINING_ROOT, names_block=names_block)
     )
 
 
-def load_class_map() -> tuple[dict[str, int], list[str]]:
-    """Parse dataset.yaml's `names:` block. Returns (name→id, id→name).
+def load_class_map() -> tuple[dict[str, int], list[tuple[int, str]]]:
+    """Parse dataset.yaml's `names:` block. Returns:
+
+      * `name_to_id` — `{"person": 0, "car": 2, ...}`
+      * `id_to_name` — `[(0, "person"), (2, "car"), ...]` sorted by id
+
+    `id_to_name` is a list of `(id, name)` tuples (not a flat list of
+    names) because our ids are *sparse* — array index ≠ class id once
+    we go COCO-aligned. Consumers that need to display class options
+    in a UI iterate the list and use the real id, not the index.
 
     The YAML is hand-edited and tiny, so we parse the names section
-    line-by-line rather than pulling in a PyYAML dependency. Format
-    accepted: `  0: person` (dict-style) or `  - person` (list-style).
+    line-by-line rather than pulling in a PyYAML dependency. Accepted
+    forms: `  0: person` (dict-style, sparse-id-friendly) or `  - foo`
+    (list-style, dense-only — legacy).
     """
     ensure_dataset_yaml()
     text = DATASET_YAML.read_text()
@@ -113,7 +129,7 @@ def load_class_map() -> tuple[dict[str, int], list[str]]:
                     by_id[int(k.strip())] = v.strip()
                 except ValueError:
                     continue
-    id_to_name = [by_id[i] for i in sorted(by_id)]
+    id_to_name = [(i, by_id[i]) for i in sorted(by_id)]
     name_to_id = {n: i for i, n in by_id.items()}
     return name_to_id, id_to_name
 
@@ -122,8 +138,7 @@ def bbox_to_yolo_line(bbox: list[float], cls_id: int) -> str:
     """Convert events.db's [x1,y1,x2,y2] in 0..1 to a YOLO label line.
 
     YOLO format per line: `<cls_id> <cx> <cy> <w> <h>` with all four
-    geometry values normalized 0..1. Six decimal places — labelImg
-    writes that, so re-saving doesn't churn whitespace.
+    geometry values normalized 0..1.
     """
     x1, y1, x2, y2 = bbox
     cx = (x1 + x2) / 2.0
@@ -142,7 +157,7 @@ def seed_labels_for_capture(
     or no events overlap, or none match a known class.
 
     The peak_bbox is the position at the moment of peak confidence,
-    not necessarily at `ts` — the human re-tightens it in labelImg.
+    not necessarily at `ts` — the human re-tightens it in the labeler.
     """
     if not db_path.exists():
         return []
@@ -171,13 +186,3 @@ def seed_labels_for_capture(
             continue
         lines.append(bbox_to_yolo_line(bbox, cls_id))
     return lines
-
-
-def write_classes_txt(target_dir: Path, id_to_name: list[str]) -> None:
-    """Drop labelImg's per-dir classes.txt so opening the folder in the
-    GUI shows the right class names without manual setup."""
-    p = target_dir / "classes.txt"
-    expected = "\n".join(id_to_name) + "\n"
-    if p.exists() and p.read_text() == expected:
-        return
-    p.write_text(expected)

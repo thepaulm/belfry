@@ -489,11 +489,10 @@ async def api_training_capture(
     stamp = datetime.datetime.fromtimestamp(ts_label).strftime("%Y%m%dT%H%M%S")
 
     training.ensure_dataset_yaml()
-    class_map, id_to_name = training.load_class_map()
+    class_map, _ = training.load_class_map()
 
     target_dir = training.STAGING_DIR / category
     target_dir.mkdir(parents=True, exist_ok=True)
-    training.write_classes_txt(target_dir, id_to_name)
 
     stem = f"{cam}_{stamp}_{uuid.uuid4().hex[:8]}"
     img_path = target_dir / f"{stem}.jpg"
@@ -611,8 +610,10 @@ async def api_training_staging() -> dict:
                 "ts": ts,
             })
 
+    # Frontend needs {id, name} pairs because class ids are sparse
+    # (COCO-aligned). A flat list of names would lose the ids.
     return {
-        "classes": id_to_name,
+        "classes": [{"id": cid, "name": name} for cid, name in id_to_name],
         "images": items,
     }
 
@@ -820,7 +821,7 @@ async def api_training_stage_event(event_id: int) -> dict:
     ts = row["ts_start"]
 
     training.ensure_dataset_yaml()
-    class_map, id_to_name = training.load_class_map()
+    class_map, _ = training.load_class_map()
     if cls not in class_map:
         # Legacy aggregate classes (animal/vehicle) or motion — no
         # fine-tune target. The user can add the class to dataset.yaml.
@@ -842,7 +843,6 @@ async def api_training_stage_event(event_id: int) -> dict:
 
     target_dir = training.STAGING_DIR / cls
     target_dir.mkdir(parents=True, exist_ok=True)
-    training.write_classes_txt(target_dir, id_to_name)
 
     stamp = datetime.datetime.fromtimestamp(ts).strftime("%Y%m%dT%H%M%S")
     stem = f"{cam}_{stamp}_{uuid.uuid4().hex[:8]}"

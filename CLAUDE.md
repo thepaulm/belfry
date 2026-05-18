@@ -28,6 +28,7 @@ Self-hosted DVR for Interlogix TVB-5301 cameras (OEM Hikvision) on a dedicated, 
 - `scripts/install-mediamtx.sh` — fetches the MediaMTX binary for the host arch.
 - `scripts/install-inference.sh` — provisions `.venv-inference/` (Python 3.10), installs Jetson torch + ultralytics + onnx deps, downloads MegaDetector + YOLO11n weights, builds device-specific TensorRT FP16 engines.
 - `scripts/promote-labeled.py` — batch alternative to the labeler's per-image Promote button; walks `belfry-training/staging/`, moves any image+`.txt` pair into flat `images/`+`labels/`. `--auto-empty-negatives` writes empty `.txt`s for `negative_*/` hard negatives.
+- `scripts/remap-class-ids.py` — one-time migration that walked existing label `.txt`s to remap from the original dense 0..6 ids to the current COCO-aligned sparse scheme (0/2/7/14/15/16/80). Kept around so the *why* of the id layout stays visible; safe to delete once the original code reviewers are no longer surprised by sparse ids.
 - `scripts/nginx-belfry.conf` — tracked copy of the Orin's nginx site (`/etc/nginx/sites-available/belfry`).
 - `scripts/belfry-tunnel.service` — autossh systemd unit; opens the reverse SSH tunnel from Orin to EC2 (Caddy upstream + admin SSH back-in).
 - `scripts/belfry-inference.service` — systemd unit for the multi-camera inference runner.
@@ -160,6 +161,23 @@ Three unambiguous file states drop out of this:
 
 An *empty* `.txt` is the YOLO sentinel for "this image has zero objects, on purpose" — a hard negative. A *missing* `.txt` means unlabeled. Don't confuse them.
 
+**Class ids are COCO-aligned and sparse**, not dense 0..N. The current layout:
+
+```yaml
+names:
+  0:  person      # COCO 0
+  2:  car         # COCO 2
+  7:  truck       # COCO 7
+  14: bird        # COCO 14
+  15: cat         # COCO 15
+  16: dog         # COCO 16
+  80: deer        # new — beyond COCO's 0..79
+  81: coyote      # new
+  82: raccoon     # new
+```
+
+Sparse ids are fine for Ultralytics — it skips unused slots during training. We pay this complexity because the fine-tune strategy (see below) extends YOLO11l's pretrained 80-class head by appending new neurons for ids 80, 81, 82, …, and weight-transferring the pretrained channels for ids 0..79 verbatim. That only works if our ids match COCO's. New wildlife classes get the next free id (83, 84, …) to keep the head extension a clean append. The labeler dropdowns show real ids (not array indices); `load_class_map()` returns `(id, name)` pairs.
+
 ### How frames get into staging
 
 Three paths, all writing the same `<cam>_<YYYYmmddTHHMMSS>_<uuid>.jpg` filename so events.db round-trips work:
@@ -197,11 +215,20 @@ Tooling is in place; what's left is data volume + the actual training run. Not b
 - ~150–300 for deer (or any other new wildlife class), since YOLO11l has zero prior on them.
 - Net ~700–1500 images is a reasonable v1 target.
 
-**Two strategies, pick at training time:**
+**Strategy: surgical head extension** (chosen approach, see comments in `dataset.yaml`)
 
-(a) **Full fine-tune from `yolo11l.pt`** — `dataset.yaml`'s class indices (0..6) don't match COCO's (0=person, 16=dog, …), so the detection head gets reinitialized for our 7 classes and we lose COCO's training on those classes. Means re-teaching person/car/etc from our own data. Risky if our per-class volume is thin.
+Don't use Ultralytics' default `yolo detect train` against a different class count — that reinitializes the entire detection head and throws away COCO's training on the 80 base classes. Instead, drop one level deeper into PyTorch:
 
-(b) **Deer-only side-detector** *(recommended first pass)* — keep the existing YOLO11l running for the COCO subset, train a separate small detector (e.g. YOLO11n) on just deer (and any other wildlife classes), run both at inference and union the boxes. Plumbing-heavier but far less data needed, doesn't risk regressing COCO-class performance. The `dataset.yaml` layout is forward-compatible with either strategy.
+1. Load `yolo11l.pt` and pull the inner `nn.Module`.
+2. Find the `Detect` head (last module). It has 3 per-scale class-prediction convs; each final `nn.Conv2d` has output channels = 80 (the COCO class count).
+3. For each of those convs, replace with a fresh `nn.Conv2d` whose output channels = 80 + N (where N = our new wildlife classes: deer, coyote, raccoon → N=3, so 83). Copy the pretrained 80 channels' weights and biases verbatim into the first 80 slots; init the new N channels' weights freshly (small random) and biases to zero.
+4. Update the head's `nc` attribute to 80+N.
+5. Train with the **backbone frozen** and a low LR on a mixed dataset (slice of COCO + our images) so the existing 80 classes don't drift. Only the new head neurons see meaningful gradients.
+6. Export to TRT for the Orin, swap in.
+
+This gives us a single-model inference path (no separate wildlife detector to merge), preserves COCO-class performance for free, and only needs enough data to teach the new classes. The COCO-aligned id layout in `dataset.yaml` is what makes step 3's weight transfer work — channel `i` in the new conv corresponds 1:1 to channel `i` in the old.
+
+The Ultralytics CLI doesn't expose this directly, but the wrapper is just a thin layer over a `torch.nn.Module`, so the head-replacement is ~30 lines of PyTorch. The `ultralytics` package itself is fine to use for the training loop, data loading, and TRT export — we only sidestep it for the head surgery.
 
 **Train/val split** — `dataset.yaml` currently points both `train:` and `val:` at `images/` (fine for a smoke test, bad for a real run). At training time, generate `train.txt` and `val.txt` file lists with a deterministic hash-based 90/10 split (a `scripts/split-dataset.py` to be written then) and point `dataset.yaml` at those instead of moving any files.
 
