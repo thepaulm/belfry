@@ -5,11 +5,12 @@ Self-hosted DVR for Interlogix TVB-5301 cameras (OEM Hikvision) on a dedicated, 
 ## Layout
 
 - `dvr/` — FastAPI app:
-  - `server.py` — routes (live, playback, retention status, set/camera APIs, `/api/events*`, `/api/inference/live` SSE proxy, `/events` page)
+  - `server.py` — routes (live, playback, retention status, set/camera APIs, `/api/events*`, `/api/inference/live` SSE proxy, `/api/training/*` (staging CRUD, label CRUD, promote, stage-event, capture), `/events`, `/training` pages)
   - `config.py` — `cameras.yaml` loader; `Camera`, `CameraSet`, `Recording`, `Retention`, `Inference`, `Config` dataclasses
   - `health.py` — `ffprobe`-based per-camera reachability checks
   - `retention.py` — async lifespan task that evicts oldest mp4 segments when the recordings volume crosses watermarks; also sweeps events DB rows + thumbnail JPEGs whose underlying footage has been evicted
-  - `static/` — vanilla-JS viewer: `index.html` (live grid), `playback.html` (scrubback + timeline pips + prev/next event nav), `events.html` (cross-camera event browse), shared `viewer.css`, `overlay.js` (live bounding-box canvas — registered as `window.BoxOverlay`, lazy SSE)
+  - `training.py` — paths + helpers for the training-data tree (`STAGING_DIR`, `IMAGES_DIR`, `LABELS_DIR`), dataset.yaml read/write, `bbox_to_yolo_line`, `seed_labels_for_capture` (events.db → YOLO lines at a timestamp). Used by both `/api/training/capture` and the labeler endpoints.
+  - `static/` — vanilla-JS viewer: `index.html` (live grid), `playback.html` (scrubback + timeline pips + prev/next event nav), `events.html` (cross-camera event browse), `training.html`+`training.js` (in-browser bbox labeler), shared `viewer.css`, `overlay.js` (live bounding-box canvas — registered as `window.BoxOverlay`, lazy SSE)
 - `inference/` — object detection pipeline (Phase 4):
   - `model.py` — `Detector` wrapping a single YOLO11l (COCO) and filtering to the `person/dog/cat/bird/car/truck` subset; thread-safe so one instance is shared across all camera threads. Replaced an earlier MegaDetector-larch + YOLO11n ensemble whose IoU-merge produced too many low-confidence person false-positives on noisy backdrops; running one model end-to-end means the live recorder and past-mode re-inference can't disagree with each other.
   - `recorder.py` — `EventRecorder` per camera, two threads. A **drain thread** does a tight `cv2.VideoCapture.read()` loop on the loopback RTSP at native ~30 fps and stores only the latest frame in `self._latest`. A separate **inference loop** wakes at `record_fps` (default 1 fps), grabs `self._latest`, runs the detector, coalesces detections into event runs (open / extend / close on cooldown), writes one row per closed run to SQLite + a peak-conf JPEG thumbnail, and publishes every detection (incl. empty batches) to `live.broadcaster`. The drain/sample split exists because a single-thread version that slept ~1 s between reads let OS-level TCP buffers fill, MediaMTX's RTSP packets stack up, and the H.264 stream eventually corrupt — `read()` would return `False`, the recorder reopened, and a few seconds of frames were lost. Past-mode re-inference on the recorded mp4 found events the live path missed for exactly that reason. Drain thread keeps the socket continuously consumed; inference cadence stays decoupled.
@@ -26,6 +27,7 @@ Self-hosted DVR for Interlogix TVB-5301 cameras (OEM Hikvision) on a dedicated, 
 - `scripts/run-inference.sh` — invokes `.venv-inference/bin/python -m inference.runner`. Invoked by `belfry-inference.service`.
 - `scripts/install-mediamtx.sh` — fetches the MediaMTX binary for the host arch.
 - `scripts/install-inference.sh` — provisions `.venv-inference/` (Python 3.10), installs Jetson torch + ultralytics + onnx deps, downloads MegaDetector + YOLO11n weights, builds device-specific TensorRT FP16 engines.
+- `scripts/promote-labeled.py` — batch alternative to the labeler's per-image Promote button; walks `belfry-training/staging/`, moves any image+`.txt` pair into flat `images/`+`labels/`. `--auto-empty-negatives` writes empty `.txt`s for `negative_*/` hard negatives.
 - `scripts/nginx-belfry.conf` — tracked copy of the Orin's nginx site (`/etc/nginx/sites-available/belfry`).
 - `scripts/belfry-tunnel.service` — autossh systemd unit; opens the reverse SSH tunnel from Orin to EC2 (Caddy upstream + admin SSH back-in).
 - `scripts/belfry-inference.service` — systemd unit for the multi-camera inference runner.
@@ -134,6 +136,58 @@ Same canvas, same `BoxOverlay`, but driven by re-running the detector on the pla
 - Browser side: `BoxOverlay` gets a `subscribePast(url)` mode that subscribes to the playback SSE instead of the live one. Boxes are buffered into a sorted `ts → boxes` array; on the player's `timeupdate` event we look up the closest sample within ±0.5 s of the absolute play time (`window_start_unix + video.currentTime`) and draw it. Switching playback windows (scrubbing into a different 5-min window) tears down the old SSE and opens a new one.
 - No persisted per-frame data: re-running inference for a re-watched window is fine at our scale, and an in-memory LRU cache by `(cam, start, duration)` is the obvious next move if rewinding the same window starts to feel slow.
 
+## Training data & labeler
+
+The fine-tune dataset lives outside the repo at `/home/paulm/belfry-training/` (configurable via `dvr/training.py:TRAINING_ROOT`). Two-stage layout:
+
+```
+belfry-training/
+  dataset.yaml             # Ultralytics class id ↔ name (source of truth)
+  staging/                 # workbench — not visible to ultralytics
+    <class>/               # class hint from the capture flow
+      cam5_…jpg            # frame
+      cam5_…txt            # YOLO labels, pre-seeded or human-edited
+    negative_<class>/      # hard negatives for <class>
+  images/                  # promoted — in the training set
+  labels/                  # YOLO `<cls_id> <cx> <cy> <w> <h>` per line
+```
+
+Three unambiguous file states drop out of this:
+
+- `staging/<class>/foo.jpg` with no `.txt` → captured, awaiting review.
+- `staging/<class>/foo.jpg` + `.txt` → reviewed, ready to promote.
+- `images/foo.jpg` + `labels/foo.txt` → in the training set.
+
+An *empty* `.txt` is the YOLO sentinel for "this image has zero objects, on purpose" — a hard negative. A *missing* `.txt` means unlabeled. Don't confuse them.
+
+### How frames get into staging
+
+Three paths, all writing the same `<cam>_<YYYYmmddTHHMMSS>_<uuid>.jpg` filename so events.db round-trips work:
+
+1. **Manual capture** — Capture button on `/sets/<set>/<cam>/playback` (or the 📷 icon on event cards, which deep-links into playback with the modal open). Grabs the current `<video>` frame to a canvas, posts the JPEG to `POST /api/training/capture` along with class + negative flag + ts. The overlay canvas isn't part of the grab so saved frames are box-free.
+2. **One-click event staging** — 📥 button on each event card on `/events`. `POST /api/training/stage-event/{id}` looks up the event row, pulls a **clean frame** from MediaMTX `/get` via ffmpeg (one-second window, first frame), writes it to `staging/<class>/`, pre-seeds the `.txt` with the event's `peak_bbox`. Do **not** reuse the events.db thumbnail for this — it has the bbox drawn into the JPEG before encoding (see `inference/recorder.py:_save_thumb`), which would teach the fine-tune to predict neon rectangles. MediaMTX `/get` requires `Z`-suffix UTC timestamps (`%Y-%m-%dT%H:%M:%S.%fZ`) and rejects Python's default `+00:00` offset isoformat with a 400.
+3. **Pre-seed on capture** — `POST /api/training/capture` also queries `events.db` for boxes overlapping the capture timestamp and writes a pre-seeded `.txt` next to the image (skipped for negative captures, since the user explicitly flagged them as no-class hits).
+
+`dataset.yaml` is the source of truth for class id ↔ name. `dvr/training.py:load_class_map()` parses it; `bbox_to_yolo_line(bbox, cls_id)` converts `[x1,y1,x2,y2]` (events.db's `peak_bbox` format) to `<cls_id> <cx> <cy> <w> <h>`.
+
+### Labeler — `/training`
+
+In-browser bounding-box labeler at `/training` (linked from the `/events` top-right). Vanilla JS + `<canvas>` + the staging-CRUD endpoints — replaces an earlier plan to use `labelImg`, which we rejected as a dead unmaintained external tool that's essentially just a canvas with a file walker.
+
+- Three-column layout: filter rail / canvas / tools panel.
+- Canvas: click-drag empty space to draw a new box (assigned the "new-box class" dropdown), click an existing box to select it, drag corners to resize, drag body to move, Delete/Backspace to remove the selected box.
+- Keyboard: `j`/`k`/arrows navigate, `s` save, `p` save+promote, `x` trash, `Esc` deselect.
+- **Autosaves silently on navigation** — switching to the next image with `j` flushes pending edits via `PUT /api/training/label`; the explicit Save button is mostly there for "commit and stay here."
+- New-box class is pre-filled from the staging folder name for positive classes (so drawing in `staging/person/` defaults new boxes to `person`). Negative folders leave it alone — the user is presumably labeling something other than the negated class.
+- Save with zero boxes writes an explicit empty `.txt` — that's the hard-negative sentinel.
+- The list includes both staging and promoted images, with a `location` field per item so the JS routes image/label/trash URLs to either `/api/training/{image,label,staging}/<cat>/<name>` (staging) or `/api/training/promoted/{image,label}/<name>` (already in `images/`+`labels/`). Filter chips: Unlabeled / Labeled / Promoted / All. Status dots: `•` unlabeled (muted), `✓` labeled (green), `★` promoted (gold).
+- Promoted images can still be edited (Save writes `labels/foo.txt` in place); Promote is disabled with a hint, Trash deletes the image+label pair.
+- All staging CRUD endpoints are path-safe via `_resolve_staging` / `_resolve_promoted` — regex-validated category and filename, plus a `.parents` containment check against `STAGING_DIR`/`IMAGES_DIR`/`LABELS_DIR`.
+
+### Promotion
+
+`scripts/promote-labeled.py` is the batch alternative to the labeler's Promote button — useful for working through a backlog. Walks `staging/`, moves any image with a `.txt` sibling into flat `images/`+`labels/`; `--auto-empty-negatives` additionally promotes any `staging/negative_*/foo.jpg` without a `.txt` by writing an empty `labels/foo.txt`.
+
 ## Scrubback UI
 
 `/sets/<set>/<cam>/playback` serves a per-camera page with:
@@ -154,6 +208,7 @@ Shipped:
 - **Phase 1** — 24/7 recording, disk-watermark retention, scrubback UI.
 - **Remote access (slice of phases 2 + 3)** — Caddy + oauth2-proxy on EC2 with Google OAuth allow-listing, autossh reverse tunnel from the Orin so all video and recordings still live on-prem.
 - **Phase 4 (all 5 slices)** — MegaDetector + YOLO11n ensemble at 1 fps per camera, event coalescing into SQLite, retention sweep, `/api/events*` + `/events` browse page, timeline pips + prev/next event nav on the playback page, live bounding-box overlay via SSE with a "Show labels" header toggle. See `~/.claude/plans/object-detection.md`.
+- **Training data pipeline** — staging→promoted layout under `/home/paulm/belfry-training/`, `dataset.yaml`-driven class map, pre-seed-from-events.db on capture, ffmpeg-driven one-click event staging from `/events`, in-browser bbox labeler at `/training` with promoted-image review. See the "Training data & labeler" section above.
 
 Remaining (see `~/.claude/plans/we-have-this-dvr-resilient-lighthouse.md` for the rest):
 
@@ -164,7 +219,7 @@ Inference follow-ups:
 
 - **Backfill CLI** — `inference/backfill.py` exists for one cam + a time range (e.g. `python -m inference.backfill --cam cam12 --since 90m --replace`); reuses the production `Detector` and the recorder's coalescing rules but drives off mp4 segments instead of RTSP. Useful for re-running after detector changes or filling gaps. Open work: an `--all-cams` mode + a `processed_until_mtime` watermark for incremental runs.
 - **Per-class threshold tuning** — after a week of real footage, drop a calibrated `class_thresholds:` block into `cameras.yaml` (likely `person: 0.55` to silence wall/edge false positives at night, `bird: 0.30` to catch partial-frame).
-- **Wildlife fine-tune (Phase B)** — YOLO11l alone has no `animal` class beyond the COCO `dog/cat/bird`, so anything else (deer, raccoon, coyote, fox) is invisible until we fine-tune. Plan: gather LILA BC + iWildCam crops plus hand-labeled crops from cam5/cam6 footage, fine-tune YOLO11l with new wildlife classes, re-export to TRT. ~150 images/class should be enough; a weekend of work.
+- **Wildlife fine-tune (Phase B)** — YOLO11l alone has no `animal` class beyond the COCO `dog/cat/bird`, so anything else (deer, raccoon, coyote, fox) is invisible until we fine-tune. The data-collection side is now in place (training pipeline + labeler at `/training`, see above); current `dataset.yaml` declares `deer` at id 6 alongside the COCO subset. Remaining work: gather LILA BC + iWildCam crops to supplement hand-labeled crops from cam5/cam6 footage, fine-tune YOLO11l with the new wildlife classes, re-export to TRT. ~150 images/class should be enough.
 
 ## Operational
 
