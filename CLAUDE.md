@@ -188,6 +188,43 @@ In-browser bounding-box labeler at `/training` (linked from the `/events` top-ri
 
 `scripts/promote-labeled.py` is the batch alternative to the labeler's Promote button — useful for working through a backlog. Walks `staging/`, moves any image with a `.txt` sibling into flat `images/`+`labels/`; `--auto-empty-negatives` additionally promotes any `staging/negative_*/foo.jpg` without a `.txt` by writing an empty `labels/foo.txt`.
 
+### Fine-tune plan (deferred until enough data)
+
+Tooling is in place; what's left is data volume + the actual training run. Not blocked on code today.
+
+**Volume targets** before training is worth attempting:
+- ~50–100 promoted images per existing COCO class (person/dog/cat/bird/car/truck) to teach this-scene precision (the wall edges that fire false-positive person at night, the specific car angles in the driveway, etc.).
+- ~150–300 for deer (or any other new wildlife class), since YOLO11l has zero prior on them.
+- Net ~700–1500 images is a reasonable v1 target.
+
+**Two strategies, pick at training time:**
+
+(a) **Full fine-tune from `yolo11l.pt`** — `dataset.yaml`'s class indices (0..6) don't match COCO's (0=person, 16=dog, …), so the detection head gets reinitialized for our 7 classes and we lose COCO's training on those classes. Means re-teaching person/car/etc from our own data. Risky if our per-class volume is thin.
+
+(b) **Deer-only side-detector** *(recommended first pass)* — keep the existing YOLO11l running for the COCO subset, train a separate small detector (e.g. YOLO11n) on just deer (and any other wildlife classes), run both at inference and union the boxes. Plumbing-heavier but far less data needed, doesn't risk regressing COCO-class performance. The `dataset.yaml` layout is forward-compatible with either strategy.
+
+**Train/val split** — `dataset.yaml` currently points both `train:` and `val:` at `images/` (fine for a smoke test, bad for a real run). At training time, generate `train.txt` and `val.txt` file lists with a deterministic hash-based 90/10 split (a `scripts/split-dataset.py` to be written then) and point `dataset.yaml` at those instead of moving any files.
+
+**Where to train: NOT the Orin.** The Jetson is fine for inference (~30 ms/frame TRT FP16) but training YOLO11l at a useful batch size wants 16–24 GB of GPU memory. Rent an A100 or 4090 hour on EC2 / Lambda / RunPod — ~$1–2 for a 50–100 epoch run. The flow:
+
+```bash
+# on the rented GPU box, with images/+labels/ rsync'd over:
+pip install ultralytics
+yolo detect train model=yolo11l.pt \
+  data=dataset.yaml \
+  epochs=100 imgsz=640 batch=16 \
+  name=belfry-v1
+# scp runs/detect/belfry-v1/weights/best.pt back to the Orin
+```
+
+**Export to TRT on the Orin** (the engine is device-specific; built against the Orin's TensorRT install, won't work elsewhere):
+
+```bash
+.venv-inference/bin/yolo export model=best.pt format=engine half=True device=0
+```
+
+**Swap in.** Replace the engine path in `inference/model.py` (or thread it through `cameras.yaml`'s inference block), restart `belfry-inference`. Verify via `/events` that new classes are firing and existing ones didn't regress.
+
 ## Scrubback UI
 
 `/sets/<set>/<cam>/playback` serves a per-camera page with:
@@ -219,7 +256,7 @@ Inference follow-ups:
 
 - **Backfill CLI** — `inference/backfill.py` exists for one cam + a time range (e.g. `python -m inference.backfill --cam cam12 --since 90m --replace`); reuses the production `Detector` and the recorder's coalescing rules but drives off mp4 segments instead of RTSP. Useful for re-running after detector changes or filling gaps. Open work: an `--all-cams` mode + a `processed_until_mtime` watermark for incremental runs.
 - **Per-class threshold tuning** — after a week of real footage, drop a calibrated `class_thresholds:` block into `cameras.yaml` (likely `person: 0.55` to silence wall/edge false positives at night, `bird: 0.30` to catch partial-frame).
-- **Wildlife fine-tune (Phase B)** — YOLO11l alone has no `animal` class beyond the COCO `dog/cat/bird`, so anything else (deer, raccoon, coyote, fox) is invisible until we fine-tune. The data-collection side is now in place (training pipeline + labeler at `/training`, see above); current `dataset.yaml` declares `deer` at id 6 alongside the COCO subset. Remaining work: gather LILA BC + iWildCam crops to supplement hand-labeled crops from cam5/cam6 footage, fine-tune YOLO11l with the new wildlife classes, re-export to TRT. ~150 images/class should be enough.
+- **Wildlife fine-tune (Phase B)** — YOLO11l alone has no `animal` class beyond the COCO `dog/cat/bird`, so anything else (deer, raccoon, coyote, fox) is invisible until we fine-tune. Data-collection tooling is shipped (training pipeline + labeler at `/training`); blocked on volume of labeled images. See the "Fine-tune plan" subsection under "Training data & labeler" above for the strategy/split/where-to-train/export-and-swap plan.
 
 ## Operational
 
