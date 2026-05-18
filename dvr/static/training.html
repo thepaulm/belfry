@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>belfry · labeler</title>
+  <link rel="stylesheet" href="/static/viewer.css?v=22">
+  <script defer src="/static/training.js?v=1"></script>
+</head>
+<body class="training-body">
+  <header>
+    <h1>belfry</h1>
+    <nav id="set-nav">
+      <a id="back-to-events" href="/events">&larr; Events</a>
+    </nav>
+    <span id="counts" class="status-pill"></span>
+    <span id="status" class="status-pill"></span>
+  </header>
+
+  <main class="training-main">
+    <aside class="training-rail">
+      <div class="rail-section">
+        <div class="rail-label">Filter</div>
+        <div id="category-chips" class="chip-row chip-row-wrap"></div>
+        <div id="state-chips" class="chip-row chip-row-wrap">
+          <button class="chip" data-state="unlabeled">Unlabeled</button>
+          <button class="chip" data-state="labeled">Labeled</button>
+          <button class="chip active" data-state="all">All</button>
+        </div>
+      </div>
+      <div class="rail-section rail-images">
+        <div class="rail-label" id="rail-image-label">Images</div>
+        <ul id="image-list"></ul>
+      </div>
+    </aside>
+
+    <section class="training-stage">
+      <div class="stage-wrap">
+        <canvas id="label-canvas"></canvas>
+        <img id="label-image" alt="" hidden>
+      </div>
+      <div id="stage-empty" class="muted" hidden>No images match the current filter.</div>
+    </section>
+
+    <aside class="training-tools">
+      <div class="tools-section">
+        <div class="rail-label">New box class</div>
+        <select id="new-box-class"></select>
+        <p class="muted small">
+          Click-drag empty space to draw a box. Click a box to select it.
+        </p>
+      </div>
+
+      <div class="tools-section" id="selected-section" hidden>
+        <div class="rail-label">Selected box</div>
+        <label class="tool-row">
+          Class
+          <select id="selected-class"></select>
+        </label>
+        <button id="delete-box-btn" class="tool-btn danger" type="button">
+          Delete box <span class="kbd">⌫</span>
+        </button>
+      </div>
+
+      <div class="tools-section">
+        <div class="rail-label">Actions</div>
+        <button id="save-btn" class="tool-btn" type="button">
+          Save <span class="kbd">s</span>
+        </button>
+        <button id="promote-btn" class="tool-btn primary" type="button">
+          Save &amp; promote <span class="kbd">p</span>
+        </button>
+        <button id="trash-btn" class="tool-btn danger" type="button">
+          Trash capture <span class="kbd">x</span>
+        </button>
+      </div>
+
+      <div class="tools-section">
+        <div class="rail-label">Navigate</div>
+        <div class="nav-row">
+          <button id="prev-btn" class="tool-btn" type="button">
+            <span class="kbd">k</span> Prev
+          </button>
+          <button id="next-btn" class="tool-btn" type="button">
+            Next <span class="kbd">j</span>
+          </button>
+        </div>
+        <p class="muted small" id="image-meta"></p>
+      </div>
+    </aside>
+  </main>
+</body>
+</html>

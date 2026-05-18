@@ -14,9 +14,9 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 
-from . import auth
+from . import auth, training
 from .config import Camera, CameraSet, load_config
 from .health import probe_all
 from .retention import RetentionLoop
@@ -450,13 +450,16 @@ async def api_playback_get(
 
 
 # --- training-image capture --------------------------------------------
-# Saves JPEG frames grabbed from the playback <video> element so the
-# detector can later be fine-tuned on real footage (e.g. deer in the
-# yard, plus negative "this wall edge is NOT a person" examples).
-# Frames are stored outside the repo at _TRAINING_DATA_ROOT under a
-# per-category subdir; labels are added later via an external tool.
+# Saves JPEG frames grabbed from the playback <video> element into the
+# staging area of the fine-tune dataset tree (see dvr/training.py).
+# When events.db has detections that overlap the captured timestamp,
+# we pre-seed a YOLO-format .txt sidecar so labelImg opens with the
+# boxes already drawn — the human then reviews/fixes/promotes.
+#
+# Negative captures (negative=True) intentionally skip pre-seeding:
+# the user has flagged the frame as a hard negative for the named
+# class, and we let them add boxes (if any) by hand in labelImg.
 
-_TRAINING_DATA_ROOT = Path("/home/paulm/belfry-training")
 _CATEGORY_RE = re.compile(r"^[a-z0-9_-]+$")
 
 
@@ -484,17 +487,210 @@ async def api_training_capture(
         raise HTTPException(status_code=400, detail="expected JPEG body (FFD8 SOI)")
     ts_label = ts if ts is not None else time.time()
     stamp = datetime.datetime.fromtimestamp(ts_label).strftime("%Y%m%dT%H%M%S")
-    target_dir = _TRAINING_DATA_ROOT / category
+
+    training.ensure_dataset_yaml()
+    class_map, id_to_name = training.load_class_map()
+
+    target_dir = training.STAGING_DIR / category
     target_dir.mkdir(parents=True, exist_ok=True)
-    fname = f"{cam}_{stamp}_{uuid.uuid4().hex[:8]}.jpg"
-    target = target_dir / fname
-    target.write_bytes(body)
+    training.write_classes_txt(target_dir, id_to_name)
+
+    stem = f"{cam}_{stamp}_{uuid.uuid4().hex[:8]}"
+    img_path = target_dir / f"{stem}.jpg"
+    img_path.write_bytes(body)
+
+    seeded_lines: list[str] = []
+    if not negative:
+        seeded_lines = training.seed_labels_for_capture(
+            config.inference.db_path, cam, ts_label, class_map,
+        )
+        if seeded_lines:
+            (target_dir / f"{stem}.txt").write_text("\n".join(seeded_lines) + "\n")
+
     return {
-        "path": str(target),
+        "path": str(img_path),
         "category": category,
-        "filename": fname,
+        "filename": img_path.name,
         "bytes": len(body),
+        "seeded_boxes": len(seeded_lines),
     }
+
+
+# --- training labeler ---------------------------------------------------
+# Backs the in-browser bbox labeler at /training. Operates on the same
+# staging tree the capture endpoint writes to. All endpoints are
+# path-safe: category and filename are constrained-regex-validated, and
+# the resolved path is checked to fall under STAGING_DIR.
+
+_LABEL_FNAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.jpg$")
+
+
+def _resolve_staging(category: str, filename: str) -> Path:
+    if not _CATEGORY_RE.fullmatch(category):
+        raise HTTPException(status_code=400, detail=f"bad category: {category!r}")
+    if not _LABEL_FNAME_RE.fullmatch(filename):
+        raise HTTPException(status_code=400, detail=f"bad filename: {filename!r}")
+    target = (training.STAGING_DIR / category / filename).resolve()
+    if training.STAGING_DIR.resolve() not in target.parents:
+        raise HTTPException(status_code=400, detail="path escapes staging")
+    return target
+
+
+_FNAME_TS_RE = re.compile(r"^(?P<cam>[A-Za-z0-9-]+)_(?P<stamp>\d{8}T\d{6})_")
+
+
+def _parse_capture_filename(name: str) -> tuple[str | None, float | None]:
+    m = _FNAME_TS_RE.match(name)
+    if not m:
+        return None, None
+    cam = m.group("cam")
+    stamp = m.group("stamp")
+    try:
+        ts = datetime.datetime.strptime(stamp, "%Y%m%dT%H%M%S").timestamp()
+    except ValueError:
+        ts = None
+    return cam, ts
+
+
+@app.get("/api/training/staging")
+async def api_training_staging() -> dict:
+    """List staging images and the class map.
+
+    `images` is sorted by filename (which is cam + ISO timestamp), so
+    the labeler sees them in a stable order across reloads.
+    """
+    training.ensure_dataset_yaml()
+    _, id_to_name = training.load_class_map()
+    items: list[dict] = []
+    if training.STAGING_DIR.is_dir():
+        for cat_dir in sorted(training.STAGING_DIR.iterdir()):
+            if not cat_dir.is_dir():
+                continue
+            if not _CATEGORY_RE.fullmatch(cat_dir.name):
+                continue
+            for img in sorted(cat_dir.glob("*.jpg")):
+                cam, ts = _parse_capture_filename(img.name)
+                items.append({
+                    "category": cat_dir.name,
+                    "filename": img.name,
+                    "has_label": img.with_suffix(".txt").exists(),
+                    "cam": cam,
+                    "ts": ts,
+                })
+    return {
+        "classes": id_to_name,
+        "images": items,
+    }
+
+
+@app.get("/api/training/image/{category}/{filename}")
+async def api_training_image(category: str, filename: str) -> FileResponse:
+    target = _resolve_staging(category, filename)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="image not found")
+    return FileResponse(
+        target,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
+@app.get("/api/training/label/{category}/{filename}")
+async def api_training_label_get(category: str, filename: str) -> Response:
+    target = _resolve_staging(category, filename)
+    txt = target.with_suffix(".txt")
+    if not txt.is_file():
+        # 200 with empty body — the labeler treats this as "no boxes
+        # yet"; 404 would clutter the console for the common case.
+        return Response(content="", media_type="text/plain")
+    return Response(content=txt.read_bytes(), media_type="text/plain")
+
+
+@app.put("/api/training/label/{category}/{filename}")
+async def api_training_label_put(
+    category: str, filename: str, request: Request,
+) -> dict:
+    target = _resolve_staging(category, filename)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="image not found")
+    body = (await request.body()).decode("utf-8", errors="replace")
+    # Light validation: every non-empty line must be `<int> <f> <f> <f> <f>`.
+    for ln in body.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        parts = ln.split()
+        if len(parts) != 5:
+            raise HTTPException(status_code=400, detail=f"bad label line: {ln!r}")
+        try:
+            int(parts[0])
+            for p in parts[1:]:
+                float(p)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"bad label line: {ln!r}")
+    txt = target.with_suffix(".txt")
+    stripped = body.strip()
+    if not stripped:
+        # Empty payload = explicit "this image has zero boxes" — we
+        # still create an empty .txt so promote treats it as labeled.
+        txt.write_text("")
+    else:
+        txt.write_text(stripped + "\n")
+    return {"saved": True, "bytes": len(body)}
+
+
+@app.delete("/api/training/label/{category}/{filename}")
+async def api_training_label_delete(category: str, filename: str) -> dict:
+    target = _resolve_staging(category, filename)
+    txt = target.with_suffix(".txt")
+    if txt.exists():
+        txt.unlink()
+    return {"deleted": True}
+
+
+@app.post("/api/training/promote/{category}/{filename}")
+async def api_training_promote(category: str, filename: str) -> dict:
+    """Move staging/<cat>/<stem>.{jpg,txt} → images/+labels/. Requires
+    the .txt to exist (caller saves first). If missing, the caller
+    should PUT an empty body to mark the image as a zero-boxes
+    negative before promoting."""
+    target = _resolve_staging(category, filename)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="image not found")
+    txt = target.with_suffix(".txt")
+    if not txt.is_file():
+        raise HTTPException(status_code=400, detail="no labels saved yet")
+    img_dest = training.IMAGES_DIR / target.name
+    txt_dest = training.LABELS_DIR / txt.name
+    if img_dest.exists() or txt_dest.exists():
+        raise HTTPException(status_code=409, detail="destination already exists")
+    training.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    training.LABELS_DIR.mkdir(parents=True, exist_ok=True)
+    target.rename(img_dest)
+    txt.rename(txt_dest)
+    return {"promoted": True, "image": str(img_dest), "label": str(txt_dest)}
+
+
+@app.delete("/api/training/staging/{category}/{filename}")
+async def api_training_staging_delete(category: str, filename: str) -> dict:
+    """Trash a capture entirely: removes image and any .txt sibling."""
+    target = _resolve_staging(category, filename)
+    txt = target.with_suffix(".txt")
+    deleted = []
+    if target.is_file():
+        target.unlink()
+        deleted.append("jpg")
+    if txt.is_file():
+        txt.unlink()
+        deleted.append("txt")
+    if not deleted:
+        raise HTTPException(status_code=404, detail="nothing to delete")
+    return {"deleted": deleted}
+
+
+@app.get("/training")
+async def view_training() -> FileResponse:
+    return FileResponse(STATIC_DIR / "training.html")
 
 
 @app.get("/")
