@@ -900,7 +900,8 @@ main#events-grid {
 
 /* ---------- events page capture-link (small camera-icon button) ---------- */
 
-.event-capture-link {
+.event-capture-link,
+.event-stage-link {
   appearance: none;
   background: transparent;
   color: var(--muted);
@@ -914,9 +915,19 @@ main#events-grid {
   line-height: 1;
 }
 
-.event-capture-link:hover {
+.event-capture-link:hover,
+.event-stage-link:hover {
   color: var(--fg);
   background: #232830;
+}
+
+.event-stage-link.staged {
+  color: #5ad17c;
+}
+
+.event-stage-link:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 @media (max-width: 768px), (max-height: 500px) {
@@ -946,6 +957,21 @@ main#events-grid {
   .tile .reload {
     opacity: 1;
   }
+}
+
+.header-action {
+  color: var(--accent);
+  text-decoration: none;
+  padding: 0.3em 0.8em;
+  border: 1px solid #2a2f37;
+  border-radius: 3px;
+  font-size: 0.85rem;
+  background: #11141a;
+}
+
+.header-action:hover {
+  background: #1c1f24;
+  color: var(--fg);
 }
 
 /* --- training labeler (/training) --- */
@@ -1032,6 +1058,7 @@ main#events-grid {
 
 #image-list .il-state.unlabeled { color: var(--muted); }
 #image-list .il-state.labeled { color: #5ad17c; }
+#image-list .il-state.promoted { color: #ffd23f; }
 
 #image-list .il-name {
   flex: 1;

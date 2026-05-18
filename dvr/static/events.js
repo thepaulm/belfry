@@ -156,6 +156,44 @@ function renderEvents(events) {
     } else {
       captureBtn.remove();
     }
+    // One-click "stage this event" — POSTs to /api/training/stage-event,
+    // which pulls a clean frame from MediaMTX via ffmpeg and pre-seeds
+    // the YOLO label with the event's peak_bbox. No navigation; the
+    // button morphs to a check once done so the user can see at a
+    // glance which events they've already added to the labeler.
+    const stageBtn = node.querySelector(".event-stage-link");
+    if (stageBtn) {
+      stageBtn.addEventListener("click", async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        stageBtn.disabled = true;
+        const orig = stageBtn.textContent;
+        stageBtn.textContent = "⏳";
+        try {
+          const r = await fetch(`/api/training/stage-event/${ev.id}`, {
+            method: "POST",
+            credentials: "same-origin",
+          });
+          if (!r.ok) {
+            const t = await r.text();
+            status.textContent = `stage failed: ${r.status} ${t}`;
+            stageBtn.textContent = orig;
+            stageBtn.disabled = false;
+            return;
+          }
+          const j = await r.json();
+          stageBtn.textContent = "✓";
+          stageBtn.classList.add("staged");
+          status.textContent =
+            `staged ${j.filename} → ${j.category}/`
+            + (j.seeded_boxes ? ` (${j.seeded_boxes} box pre-seeded)` : "");
+        } catch (err) {
+          status.textContent = `stage error: ${err.message}`;
+          stageBtn.textContent = orig;
+          stageBtn.disabled = false;
+        }
+      });
+    }
     if (ev.thumb_url) {
       const img = node.querySelector(".event-thumb");
       img.src = ev.thumb_url;

@@ -83,43 +83,61 @@ async function fetchStaging() {
   return r.json();
 }
 
-async function fetchLabel(category, filename) {
-  const r = await fetch(
-    `/api/training/label/${encodeURIComponent(category)}/${encodeURIComponent(filename)}`,
-    { credentials: "same-origin" },
-  );
+// URL builders. The list endpoint returns a `location` field per image
+// — "staging" (in staging/<cat>/) or "promoted" (in images/+labels/)
+// — and the API routes are parallel but rooted at different dirs.
+function imageUrl(im) {
+  if (im.location === "promoted") {
+    return `/api/training/promoted/image/${encodeURIComponent(im.filename)}`;
+  }
+  return `/api/training/image/${encodeURIComponent(im.category)}/${encodeURIComponent(im.filename)}`;
+}
+
+function labelUrl(im) {
+  if (im.location === "promoted") {
+    return `/api/training/promoted/label/${encodeURIComponent(im.filename)}`;
+  }
+  return `/api/training/label/${encodeURIComponent(im.category)}/${encodeURIComponent(im.filename)}`;
+}
+
+function trashUrl(im) {
+  if (im.location === "promoted") {
+    return `/api/training/promoted/${encodeURIComponent(im.filename)}`;
+  }
+  return `/api/training/staging/${encodeURIComponent(im.category)}/${encodeURIComponent(im.filename)}`;
+}
+
+async function fetchLabel(im) {
+  const r = await fetch(labelUrl(im), { credentials: "same-origin" });
   if (!r.ok) throw new Error(`label ${r.status}`);
   return r.text();
 }
 
-async function putLabel(category, filename, body) {
-  const r = await fetch(
-    `/api/training/label/${encodeURIComponent(category)}/${encodeURIComponent(filename)}`,
-    {
-      method: "PUT",
-      body: body,
-      headers: { "Content-Type": "text/plain" },
-      credentials: "same-origin",
-    },
-  );
+async function putLabel(im, body) {
+  const r = await fetch(labelUrl(im), {
+    method: "PUT",
+    body: body,
+    headers: { "Content-Type": "text/plain" },
+    credentials: "same-origin",
+  });
   if (!r.ok) throw new Error(`save ${r.status}: ${await r.text()}`);
   return r.json();
 }
 
-async function promoteCurrent(category, filename) {
+async function promoteCurrent(im) {
+  if (im.location !== "staging") {
+    throw new Error("not in staging");
+  }
   const r = await fetch(
-    `/api/training/promote/${encodeURIComponent(category)}/${encodeURIComponent(filename)}`,
+    `/api/training/promote/${encodeURIComponent(im.category)}/${encodeURIComponent(im.filename)}`,
     { method: "POST", credentials: "same-origin" },
   );
   if (!r.ok) throw new Error(`promote ${r.status}: ${await r.text()}`);
   return r.json();
 }
 
-async function trashCurrent(category, filename) {
-  const r = await fetch(
-    `/api/training/staging/${encodeURIComponent(category)}/${encodeURIComponent(filename)}`,
-    { method: "DELETE", credentials: "same-origin" },
-  );
+async function trashCurrent(im) {
+  const r = await fetch(trashUrl(im), { method: "DELETE", credentials: "same-origin" });
   if (!r.ok) throw new Error(`trash ${r.status}: ${await r.text()}`);
   return r.json();
 }
@@ -165,9 +183,16 @@ function serializeYolo(boxes) {
 function applyFilter() {
   const { categories, state: stateFilter } = state.filter;
   state.filtered = state.allImages.filter(im => {
-    if (categories.size && !categories.has(im.category)) return false;
-    if (stateFilter === "unlabeled" && im.has_label) return false;
-    if (stateFilter === "labeled" && !im.has_label) return false;
+    // Category chips only act on staging items (promoted has no
+    // category). When a category is selected, we hide promoted.
+    if (categories.size) {
+      if (im.location !== "staging") return false;
+      if (!categories.has(im.category)) return false;
+    }
+    if (stateFilter === "promoted") return im.location === "promoted";
+    if (stateFilter === "unlabeled") return im.location === "staging" && !im.has_label;
+    if (stateFilter === "labeled") return im.location === "staging" && im.has_label;
+    // "all" — show everything (staging + promoted)
     return true;
   });
 }
@@ -179,12 +204,22 @@ function renderImageList() {
     const li = document.createElement("li");
     if (i === state.currentIdx) li.classList.add("active");
     const dot = document.createElement("span");
-    dot.className = "il-state " + (im.has_label ? "labeled" : "unlabeled");
-    dot.textContent = im.has_label ? "✓" : "•";
+    let dotChar, dotCls;
+    if (im.location === "promoted") {
+      dotChar = "★"; dotCls = "promoted";
+    } else if (im.has_label) {
+      dotChar = "✓"; dotCls = "labeled";
+    } else {
+      dotChar = "•"; dotCls = "unlabeled";
+    }
+    dot.className = `il-state ${dotCls}`;
+    dot.textContent = dotChar;
     const name = document.createElement("span");
     name.className = "il-name";
     name.textContent = im.filename;
-    name.title = `${im.category}/${im.filename}`;
+    name.title = im.location === "promoted"
+      ? `(promoted) ${im.filename}`
+      : `${im.category}/${im.filename}`;
     li.appendChild(dot);
     li.appendChild(name);
     li.addEventListener("click", () => loadAt(i));
@@ -195,7 +230,13 @@ function renderImageList() {
 
 function renderCategoryChips() {
   els.categoryChips.innerHTML = "";
-  const cats = new Set(state.allImages.map(im => im.category));
+  // Promoted items have category=null; skip them when building the chips
+  // (the chip filter only applies to staging anyway).
+  const cats = new Set(
+    state.allImages
+      .filter(im => im.location === "staging" && im.category)
+      .map(im => im.category)
+  );
   // Sort: positive classes first by name, then negatives.
   const order = [...cats].sort((a, b) => {
     const an = a.startsWith("negative_") ? 1 : 0;
@@ -234,7 +275,10 @@ function refilter() {
 }
 
 function keyOf(im) {
-  return im ? `${im.category}/${im.filename}` : null;
+  if (!im) return null;
+  return im.location === "promoted"
+    ? `__promoted__/${im.filename}`
+    : `${im.category}/${im.filename}`;
 }
 
 function currentKey() {
@@ -274,10 +318,9 @@ async function loadAt(idx) {
   els.stageEmpty.hidden = true;
   els.image.hidden = false;
   // Pre-fill the new-box class dropdown from the folder name when the
-  // hint is a positive class. Negative folders carry no implied class
-  // for *new* boxes — the user is presumably labeling something other
-  // than the negated class — so we leave the dropdown as-is.
-  if (!im.category.startsWith("negative_")) {
+  // hint is a positive staging class. Promoted images and negative
+  // folders carry no implied class for *new* boxes — leave as-is.
+  if (im.location === "staging" && im.category && !im.category.startsWith("negative_")) {
     const guessId = state.classes.indexOf(im.category);
     if (guessId >= 0) {
       state.newBoxClassId = guessId;
@@ -286,7 +329,6 @@ async function loadAt(idx) {
   }
 
   // Start the image fetch and the label fetch in parallel.
-  const imgUrl = `/api/training/image/${encodeURIComponent(im.category)}/${encodeURIComponent(im.filename)}`;
   els.image.onload = () => {
     sizeCanvas();
     drawCanvas();
@@ -294,13 +336,14 @@ async function loadAt(idx) {
   els.image.onerror = () => {
     els.status.textContent = `image load failed: ${im.filename}`;
   };
-  els.image.src = imgUrl;
+  els.image.src = imageUrl(im);
 
-  els.imageMeta.textContent = `${im.category} · ${im.filename}`
+  const locLabel = im.location === "promoted" ? "promoted" : im.category;
+  els.imageMeta.textContent = `${locLabel} · ${im.filename}`
     + (im.ts ? ` · ${new Date(im.ts * 1000).toLocaleString()}` : "");
 
   try {
-    const text = await fetchLabel(im.category, im.filename);
+    const text = await fetchLabel(im);
     state.boxes = parseYolo(text);
     drawCanvas();
   } catch (e) {
@@ -550,14 +593,26 @@ function updateSelectedUI() {
 
 function updateButtons() {
   const hasImage = state.currentIdx >= 0;
+  const im = hasImage ? state.filtered[state.currentIdx] : null;
+  const isPromoted = im && im.location === "promoted";
   els.saveBtn.disabled = !hasImage;
-  els.promoteBtn.disabled = !hasImage;
+  els.promoteBtn.disabled = !hasImage || isPromoted;
   els.trashBtn.disabled = !hasImage;
   els.prevBtn.disabled = state.currentIdx <= 0;
   els.nextBtn.disabled = state.currentIdx < 0 || state.currentIdx >= state.filtered.length - 1;
-  const labeled = state.filtered.filter(im => im.has_label).length;
+  const hint = document.getElementById("promoted-hint");
+  if (hint) hint.hidden = !isPromoted;
+  // Count: in the "Promoted" filter the whole list is already labeled,
+  // so "X/X promoted" reads cleaner than "X/X labeled".
   const dirty = state.dirty ? " ●" : "";
-  els.counts.textContent = `${labeled}/${state.filtered.length} labeled${dirty}`;
+  let counts;
+  if (state.filter.state === "promoted") {
+    counts = `${state.filtered.length} promoted`;
+  } else {
+    const labeled = state.filtered.filter(im => im.has_label || im.location === "promoted").length;
+    counts = `${labeled}/${state.filtered.length} labeled`;
+  }
+  els.counts.textContent = counts + dirty;
 }
 
 function deleteSelectedBox() {
@@ -573,7 +628,7 @@ async function saveCurrent({ silent = false } = {}) {
   if (state.currentIdx < 0) return;
   const im = state.filtered[state.currentIdx];
   const body = serializeYolo(state.boxes);
-  await putLabel(im.category, im.filename, body);
+  await putLabel(im, body);
   state.dirty = false;
   if (!im.has_label) {
     im.has_label = true;
@@ -591,9 +646,17 @@ async function saveCurrent({ silent = false } = {}) {
 async function promoteCurrentBtn() {
   if (state.currentIdx < 0) return;
   const im = state.filtered[state.currentIdx];
+  if (im.location !== "staging") {
+    // Already in the training set; promote is a no-op. Still save any
+    // edits so the user gets a "saved" status pill.
+    try { await saveCurrent(); } catch (e) {
+      els.status.textContent = `save failed: ${e.message}`;
+    }
+    return;
+  }
   try {
     await saveCurrent({ silent: true });
-    await promoteCurrent(im.category, im.filename);
+    await promoteCurrent(im);
   } catch (e) {
     els.status.textContent = `promote failed: ${e.message}`;
     return;
@@ -605,9 +668,10 @@ async function promoteCurrentBtn() {
 async function trashCurrentBtn() {
   if (state.currentIdx < 0) return;
   const im = state.filtered[state.currentIdx];
-  if (!confirm(`Trash ${im.category}/${im.filename}?\nThis deletes the image and any labels.`)) return;
+  const where = im.location === "promoted" ? "(promoted)" : im.category;
+  if (!confirm(`Trash ${where}/${im.filename}?\nThis deletes the image and any labels.`)) return;
   try {
-    await trashCurrent(im.category, im.filename);
+    await trashCurrent(im);
   } catch (e) {
     els.status.textContent = `trash failed: ${e.message}`;
     return;

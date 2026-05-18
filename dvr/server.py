@@ -536,6 +536,20 @@ def _resolve_staging(category: str, filename: str) -> Path:
     return target
 
 
+def _resolve_promoted(filename: str) -> tuple[Path, Path]:
+    """(images_path, labels_path) for a promoted file. The label is the
+    same stem as the jpg, just under labels/ with a .txt extension."""
+    if not _LABEL_FNAME_RE.fullmatch(filename):
+        raise HTTPException(status_code=400, detail=f"bad filename: {filename!r}")
+    img = (training.IMAGES_DIR / filename).resolve()
+    txt = (training.LABELS_DIR / (Path(filename).stem + ".txt")).resolve()
+    if training.IMAGES_DIR.resolve() not in img.parents:
+        raise HTTPException(status_code=400, detail="path escapes images")
+    if training.LABELS_DIR.resolve() not in txt.parents:
+        raise HTTPException(status_code=400, detail="path escapes labels")
+    return img, txt
+
+
 _FNAME_TS_RE = re.compile(r"^(?P<cam>[A-Za-z0-9-]+)_(?P<stamp>\d{8}T\d{6})_")
 
 
@@ -554,14 +568,18 @@ def _parse_capture_filename(name: str) -> tuple[str | None, float | None]:
 
 @app.get("/api/training/staging")
 async def api_training_staging() -> dict:
-    """List staging images and the class map.
+    """List training images (both staging and promoted) and the class
+    map.
 
-    `images` is sorted by filename (which is cam + ISO timestamp), so
-    the labeler sees them in a stable order across reloads.
+    Each item has a `location` field — `"staging"` (workbench, in
+    staging/<category>/) or `"promoted"` (training set, in images/+
+    labels/) — so the frontend can hit the right CRUD route.
     """
     training.ensure_dataset_yaml()
     _, id_to_name = training.load_class_map()
     items: list[dict] = []
+
+    # Staging — workbench. One subdir per class hint (positive or negative).
     if training.STAGING_DIR.is_dir():
         for cat_dir in sorted(training.STAGING_DIR.iterdir()):
             if not cat_dir.is_dir():
@@ -571,12 +589,28 @@ async def api_training_staging() -> dict:
             for img in sorted(cat_dir.glob("*.jpg")):
                 cam, ts = _parse_capture_filename(img.name)
                 items.append({
+                    "location": "staging",
                     "category": cat_dir.name,
                     "filename": img.name,
                     "has_label": img.with_suffix(".txt").exists(),
                     "cam": cam,
                     "ts": ts,
                 })
+
+    # Promoted — in the training set. Flat tree, no class folders.
+    if training.IMAGES_DIR.is_dir():
+        for img in sorted(training.IMAGES_DIR.glob("*.jpg")):
+            cam, ts = _parse_capture_filename(img.name)
+            label_path = training.LABELS_DIR / f"{img.stem}.txt"
+            items.append({
+                "location": "promoted",
+                "category": None,
+                "filename": img.name,
+                "has_label": label_path.is_file(),
+                "cam": cam,
+                "ts": ts,
+            })
+
     return {
         "classes": id_to_name,
         "images": items,
@@ -686,6 +720,170 @@ async def api_training_staging_delete(category: str, filename: str) -> dict:
     if not deleted:
         raise HTTPException(status_code=404, detail="nothing to delete")
     return {"deleted": deleted}
+
+
+# Promoted-image CRUD — same shape as the staging routes but rooted at
+# images/+labels/. The labeler uses these when a list item's
+# location is "promoted". No promote endpoint here (it's already
+# promoted); a trash removes the pair from the training set.
+
+
+@app.get("/api/training/promoted/image/{filename}")
+async def api_training_promoted_image(filename: str) -> FileResponse:
+    img, _ = _resolve_promoted(filename)
+    if not img.is_file():
+        raise HTTPException(status_code=404, detail="image not found")
+    return FileResponse(
+        img,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
+@app.get("/api/training/promoted/label/{filename}")
+async def api_training_promoted_label_get(filename: str) -> Response:
+    _, txt = _resolve_promoted(filename)
+    if not txt.is_file():
+        return Response(content="", media_type="text/plain")
+    return Response(content=txt.read_bytes(), media_type="text/plain")
+
+
+@app.put("/api/training/promoted/label/{filename}")
+async def api_training_promoted_label_put(filename: str, request: Request) -> dict:
+    img, txt = _resolve_promoted(filename)
+    if not img.is_file():
+        raise HTTPException(status_code=404, detail="image not found")
+    body = (await request.body()).decode("utf-8", errors="replace")
+    for ln in body.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        parts = ln.split()
+        if len(parts) != 5:
+            raise HTTPException(status_code=400, detail=f"bad label line: {ln!r}")
+        try:
+            int(parts[0])
+            for p in parts[1:]:
+                float(p)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"bad label line: {ln!r}")
+    stripped = body.strip()
+    txt.parent.mkdir(parents=True, exist_ok=True)
+    txt.write_text("" if not stripped else stripped + "\n")
+    return {"saved": True, "bytes": len(body)}
+
+
+@app.delete("/api/training/promoted/{filename}")
+async def api_training_promoted_delete(filename: str) -> dict:
+    img, txt = _resolve_promoted(filename)
+    deleted = []
+    if img.is_file():
+        img.unlink()
+        deleted.append("jpg")
+    if txt.is_file():
+        txt.unlink()
+        deleted.append("txt")
+    if not deleted:
+        raise HTTPException(status_code=404, detail="nothing to delete")
+    return {"deleted": deleted}
+
+
+# --- stage event -------------------------------------------------------
+# One-click "send this event into the labeler" from /events cards.
+# Pulls a clean (un-boxed) frame from the recorded mp4 via ffmpeg
+# against MediaMTX /get, drops it in staging/<class>/, and pre-seeds
+# the .txt with the event's stored peak_bbox. We can't use the
+# events.db thumbnail directly because that has the bbox baked into
+# the JPEG (drawn before encoding in inference/recorder.py), which
+# would teach the fine-tune to predict neon rectangles.
+
+_FFMPEG_BIN = "/usr/bin/ffmpeg"
+
+
+@app.post("/api/training/stage-event/{event_id}")
+async def api_training_stage_event(event_id: int) -> dict:
+    conn = _open_events_db()
+    if conn is None:
+        raise HTTPException(status_code=404, detail="no events db")
+    try:
+        row = conn.execute(
+            "SELECT camera, class, ts_start, peak_bbox FROM events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"event {event_id} not found")
+
+    cam = row["camera"]
+    cls = row["class"]
+    ts = row["ts_start"]
+
+    training.ensure_dataset_yaml()
+    class_map, id_to_name = training.load_class_map()
+    if cls not in class_map:
+        # Legacy aggregate classes (animal/vehicle) or motion — no
+        # fine-tune target. The user can add the class to dataset.yaml.
+        raise HTTPException(
+            status_code=400,
+            detail=f"event class {cls!r} not in dataset.yaml; edit it to add the class",
+        )
+
+    # MediaMTX expects the trailing `Z` form, not `+00:00`; Python's
+    # default isoformat() produces the offset style which /get rejects
+    # with a 400.
+    start_iso = datetime.datetime.fromtimestamp(
+        ts, tz=datetime.timezone.utc
+    ).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    mp4_url = (
+        f"{_MEDIAMTX_PLAYBACK}/get?path={cam}"
+        f"&start={start_iso}&duration=1s&format=mp4"
+    )
+
+    target_dir = training.STAGING_DIR / cls
+    target_dir.mkdir(parents=True, exist_ok=True)
+    training.write_classes_txt(target_dir, id_to_name)
+
+    stamp = datetime.datetime.fromtimestamp(ts).strftime("%Y%m%dT%H%M%S")
+    stem = f"{cam}_{stamp}_{uuid.uuid4().hex[:8]}"
+    img_path = target_dir / f"{stem}.jpg"
+
+    proc = await asyncio.create_subprocess_exec(
+        _FFMPEG_BIN,
+        "-y",
+        "-loglevel", "error",
+        "-i", mp4_url,
+        "-frames:v", "1",
+        "-q:v", "2",
+        str(img_path),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise HTTPException(status_code=504, detail="ffmpeg timed out")
+    if proc.returncode != 0 or not img_path.is_file():
+        # ffmpeg can write a 0-byte file then exit non-zero; clean up.
+        if img_path.exists():
+            img_path.unlink()
+        msg = stderr.decode("latin1", errors="replace")[-200:]
+        raise HTTPException(status_code=502, detail=f"ffmpeg failed: {msg}")
+
+    seeded = training.seed_labels_for_capture(
+        config.inference.db_path, cam, ts, class_map,
+    )
+    if seeded:
+        (target_dir / f"{stem}.txt").write_text("\n".join(seeded) + "\n")
+
+    return {
+        "staged": True,
+        "category": cls,
+        "filename": img_path.name,
+        "seeded_boxes": len(seeded),
+    }
 
 
 @app.get("/training")

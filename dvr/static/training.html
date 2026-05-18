@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>belfry · labeler</title>
-  <link rel="stylesheet" href="/static/viewer.css?v=22">
-  <script defer src="/static/training.js?v=1"></script>
+  <link rel="stylesheet" href="/static/viewer.css?v=24">
+  <script defer src="/static/training.js?v=2"></script>
 </head>
 <body class="training-body">
   <header>
@@ -25,6 +25,7 @@
         <div id="state-chips" class="chip-row chip-row-wrap">
           <button class="chip" data-state="unlabeled">Unlabeled</button>
           <button class="chip" data-state="labeled">Labeled</button>
+          <button class="chip" data-state="promoted">Promoted</button>
           <button class="chip active" data-state="all">All</button>
         </div>
       </div>
@@ -70,6 +71,9 @@
         <button id="promote-btn" class="tool-btn primary" type="button">
           Save &amp; promote <span class="kbd">p</span>
         </button>
+        <span id="promoted-hint" class="muted small" hidden>
+          Already promoted — Save writes labels in place.
+        </span>
         <button id="trash-btn" class="tool-btn danger" type="button">
           Trash capture <span class="kbd">x</span>
         </button>
