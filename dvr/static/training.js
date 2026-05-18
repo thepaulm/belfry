@@ -599,12 +599,19 @@ function updateButtons() {
   const im = hasImage ? state.filtered[state.currentIdx] : null;
   const isPromoted = im && im.location === "promoted";
   els.saveBtn.disabled = !hasImage;
-  els.promoteBtn.disabled = !hasImage || isPromoted;
+  // Promoted images can't *re-*promote; the button stays enabled and
+  // its label flips to "Save" (the click handler falls through to a
+  // plain save for promoted items). Two visible Save paths is fine —
+  // they're styled differently and both bind to the same action.
+  els.promoteBtn.disabled = !hasImage;
+  const promoteLabel = els.promoteBtn.querySelector(".btn-label");
+  if (promoteLabel) {
+    promoteLabel.textContent = isPromoted ? "Save" : "Save & promote";
+  }
   els.trashBtn.disabled = !hasImage;
-  els.prevBtn.disabled = state.currentIdx <= 0;
-  els.nextBtn.disabled = state.currentIdx < 0 || state.currentIdx >= state.filtered.length - 1;
-  const hint = document.getElementById("promoted-hint");
-  if (hint) hint.hidden = !isPromoted;
+  // Prev/Next wrap around — only disabled when there's nothing to navigate.
+  els.prevBtn.disabled = !hasImage;
+  els.nextBtn.disabled = !hasImage;
   // Count: in the "Promoted" filter the whole list is already labeled,
   // so "X/X promoted" reads cleaner than "X/X labeled".
   const dirty = state.dirty ? " ●" : "";
@@ -697,10 +704,14 @@ function removeCurrentFromList() {
 }
 
 function nextImage() {
-  if (state.currentIdx < state.filtered.length - 1) loadAt(state.currentIdx + 1);
+  if (!state.filtered.length) return;
+  const n = state.filtered.length;
+  loadAt((state.currentIdx + 1) % n);
 }
 function prevImage() {
-  if (state.currentIdx > 0) loadAt(state.currentIdx - 1);
+  if (!state.filtered.length) return;
+  const n = state.filtered.length;
+  loadAt((state.currentIdx - 1 + n) % n);
 }
 
 // ---------- Wiring ----------

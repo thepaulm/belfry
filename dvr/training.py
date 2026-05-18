@@ -54,6 +54,7 @@ _DEFAULT_CLASSES: list[tuple[int, str]] = [
     (80, "deer"),
     (81, "coyote"),
     (82, "raccoon"),
+    (83, "rabbit"),
 ]
 
 _DATASET_YAML_TEMPLATE = """\
