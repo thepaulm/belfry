@@ -199,21 +199,26 @@ class BoxOverlay {
   _renderPastFrame() {
     if (!this._pastSamples || !this._pastVideo) return;
     const target = this._pastWindowStartUnix + this._pastVideo.currentTime;
-    // Linear backwards walk: samples are sorted ascending, the right
-    // hit is almost always among the most recent few. Cap at 60
-    // samples scanned (= 1 minute of 1 fps history) before giving up.
+    // Step-hold: pick the most recent sample whose ts ≤ target. Using
+    // absolute-closest would let a future sample win (e.g. target=0.4
+    // is equidistant from samples at 0 and 1; the absolute-closest tie
+    // routinely picked the future one), which made boxes lead the
+    // object — a person walking right-to-left would have their box
+    // already at the left-of-where-they-are position. With 1 fps
+    // sampling the worst-case staleness is ~1s; we tolerate a tiny
+    // forward slop so the very first sample (typically ts ≈ start_unix
+    // for a window the user just opened, with target a hair behind it
+    // due to mp4 startup) still draws instead of clearing the canvas.
     const samples = this._pastSamples;
     let best = null;
-    let bestDist = this._pastTolerance + 1;
-    for (let i = samples.length - 1, n = 0; i >= 0 && n < 60; i--, n++) {
-      const dist = Math.abs(samples[i].ts - target);
-      if (dist < bestDist) {
-        best = samples[i];
-        bestDist = dist;
+    for (let i = samples.length - 1; i >= 0; i--) {
+      const s = samples[i];
+      if (s.ts <= target + 0.05) {
+        best = s;
+        break;
       }
-      if (samples[i].ts < target - this._pastTolerance) break;
     }
-    if (best && bestDist <= this._pastTolerance) {
+    if (best && (target - best.ts) <= this._pastTolerance) {
       this._draw(best.boxes || []);
     } else {
       this._clear();

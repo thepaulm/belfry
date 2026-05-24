@@ -373,8 +373,21 @@ class EventRecorder:
             out_dir.mkdir(parents=True, exist_ok=True)
             fname = f"{run.ts_start:.3f}_{run.cls}.jpg"
             out_path = out_dir / fname
-            draw_thumb_bbox(run.peak_frame, run.peak_bbox, run.cls)
-            cv2.imwrite(str(out_path), run.peak_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            # Boxed thumb first so retention.py — which derives the
+            # clean frame's path from thumb_path — can never see a
+            # clean frame without a row to drive its eviction. The
+            # copy is required because draw_thumb_bbox mutates in
+            # place and the clean write below has to see the
+            # unmodified peak_frame. The clean sibling exists so
+            # training-staging can use the actual peak frame instead
+            # of re-fetching via MediaMTX /get, whose keyframe-round
+            # lands seconds past brief events (single-sample birds)
+            # and returns an empty scene.
+            boxed = run.peak_frame.copy()
+            draw_thumb_bbox(boxed, run.peak_bbox, run.cls)
+            cv2.imwrite(str(out_path), boxed, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            clean_path = out_dir / f"{out_path.stem}.frame.jpg"
+            cv2.imwrite(str(clean_path), run.peak_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
             return str(out_path.relative_to(self.thumbs_dir))
         except Exception:
             logger.exception("thumbnail save failed")

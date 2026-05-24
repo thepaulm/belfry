@@ -243,14 +243,27 @@ class RetentionLoop:
                         continue
                     for _id, thumb_rel in rows:
                         if thumb_rel:
+                            thumb_path = self.inference.thumbs_dir / thumb_rel
                             try:
-                                (self.inference.thumbs_dir / thumb_rel).unlink(
-                                    missing_ok=True
-                                )
+                                thumb_path.unlink(missing_ok=True)
                                 thumbs_evicted += 1
                             except OSError as e:
                                 logger.warning(
                                     "thumb unlink failed: %s: %s", thumb_rel, e
+                                )
+                            # Sibling clean (no-bbox) frame saved alongside
+                            # the boxed thumb by the recorder. Best-effort
+                            # cleanup; older events predate this file.
+                            clean_path = (
+                                thumb_path.parent / f"{thumb_path.stem}.frame.jpg"
+                            )
+                            try:
+                                clean_path.unlink(missing_ok=True)
+                            except OSError as e:
+                                logger.warning(
+                                    "clean frame unlink failed: %s: %s",
+                                    clean_path,
+                                    e,
                                 )
                     conn.execute(
                         "DELETE FROM events WHERE camera = ? AND ts_end < ?",

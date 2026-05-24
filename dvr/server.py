@@ -6,6 +6,7 @@ import datetime
 import json
 import os
 import re
+import shutil
 import sqlite3
 import time
 import uuid
@@ -928,7 +929,7 @@ async def api_training_stage_event(event_id: int) -> dict:
         raise HTTPException(status_code=404, detail="no events db")
     try:
         row = conn.execute(
-            "SELECT camera, class, ts_start, peak_bbox FROM events WHERE id = ?",
+            "SELECT camera, class, ts_start, peak_bbox, thumb_path FROM events WHERE id = ?",
             (event_id,),
         ).fetchone()
     finally:
@@ -939,6 +940,7 @@ async def api_training_stage_event(event_id: int) -> dict:
     cam = row["camera"]
     cls = row["class"]
     ts = row["ts_start"]
+    thumb_rel = row["thumb_path"]
 
     training.ensure_dataset_yaml()
     class_map, _ = training.load_class_map()
@@ -950,17 +952,6 @@ async def api_training_stage_event(event_id: int) -> dict:
             detail=f"event class {cls!r} not in dataset.yaml; edit it to add the class",
         )
 
-    # MediaMTX expects the trailing `Z` form, not `+00:00`; Python's
-    # default isoformat() produces the offset style which /get rejects
-    # with a 400.
-    start_iso = datetime.datetime.fromtimestamp(
-        ts, tz=datetime.timezone.utc
-    ).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    mp4_url = (
-        f"{_MEDIAMTX_PLAYBACK}/get?path={cam}"
-        f"&start={start_iso}&duration=1s&format=mp4"
-    )
-
     target_dir = training.STAGING_DIR / cls
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -968,29 +959,58 @@ async def api_training_stage_event(event_id: int) -> dict:
     stem = f"{cam}_{stamp}_{uuid.uuid4().hex[:8]}"
     img_path = target_dir / f"{stem}.jpg"
 
-    proc = await asyncio.create_subprocess_exec(
-        _FFMPEG_BIN,
-        "-y",
-        "-loglevel", "error",
-        "-i", mp4_url,
-        "-frames:v", "1",
-        "-q:v", "2",
-        str(img_path),
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=15.0)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        raise HTTPException(status_code=504, detail="ffmpeg timed out")
-    if proc.returncode != 0 or not img_path.is_file():
-        # ffmpeg can write a 0-byte file then exit non-zero; clean up.
-        if img_path.exists():
-            img_path.unlink()
-        msg = stderr.decode("latin1", errors="replace")[-200:]
-        raise HTTPException(status_code=502, detail=f"ffmpeg failed: {msg}")
+    # Prefer the clean (no-bbox) peak frame the recorder saved next to
+    # the boxed thumbnail. MediaMTX /get rounds to the next keyframe at
+    # or after the requested time, which for brief events (single-sample
+    # birds) lands ~1s past the action and returns an empty scene — so
+    # the staged image wouldn't match the events-grid thumbnail. The
+    # recorder writes the clean frame under the same dir as the
+    # thumbnail with a `.frame.jpg` suffix; older events that predate
+    # that change fall back to the ffmpeg+MediaMTX path below.
+    clean_src: Path | None = None
+    if thumb_rel:
+        candidate = (config.inference.thumbs_dir / thumb_rel).resolve()
+        if config.inference.thumbs_dir.resolve() in candidate.parents:
+            sibling = candidate.parent / f"{candidate.stem}.frame.jpg"
+            if sibling.is_file():
+                clean_src = sibling
+
+    if clean_src is not None:
+        await asyncio.to_thread(shutil.copyfile, clean_src, img_path)
+    else:
+        # Legacy path. MediaMTX expects the trailing `Z` form, not
+        # `+00:00`; Python's default isoformat() produces the offset
+        # style which /get rejects with a 400.
+        start_iso = datetime.datetime.fromtimestamp(
+            ts, tz=datetime.timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        mp4_url = (
+            f"{_MEDIAMTX_PLAYBACK}/get?path={cam}"
+            f"&start={start_iso}&duration=1s&format=mp4"
+        )
+        proc = await asyncio.create_subprocess_exec(
+            _FFMPEG_BIN,
+            "-y",
+            "-loglevel", "error",
+            "-i", mp4_url,
+            "-frames:v", "1",
+            "-q:v", "2",
+            str(img_path),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise HTTPException(status_code=504, detail="ffmpeg timed out")
+        if proc.returncode != 0 or not img_path.is_file():
+            # ffmpeg can write a 0-byte file then exit non-zero; clean up.
+            if img_path.exists():
+                img_path.unlink()
+            msg = stderr.decode("latin1", errors="replace")[-200:]
+            raise HTTPException(status_code=502, detail=f"ffmpeg failed: {msg}")
 
     seeded = training.seed_labels_for_capture(
         config.inference.db_path, cam, ts, class_map,
