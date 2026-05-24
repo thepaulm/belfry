@@ -925,9 +925,20 @@ main#events-grid {
   color: #5ad17c;
 }
 
+.event-stage-link.promoted {
+  color: #f0c14b;
+}
+
 .event-stage-link:disabled {
   cursor: default;
   opacity: 0.6;
+}
+
+/* Staged/promoted disabled states aren't faded — they're a deliberate
+   indicator, not a hint that the click is broken. */
+.event-stage-link.staged:disabled,
+.event-stage-link.promoted:disabled {
+  opacity: 1;
 }
 
 @media (max-width: 768px), (max-height: 500px) {

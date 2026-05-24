@@ -113,6 +113,31 @@ function buildEventsUrl() {
   return `/api/events?${p.toString()}`;
 }
 
+// Stage-button visual state, driven both at render time (from
+// ev.training_status) and after a successful POST. Three states:
+//   none      — 📥, clickable; the event isn't in the training tree
+//   staging   — ✓ green, disabled; image is in staging/<class>/
+//   promoted  — ★ gold, disabled; image has been moved into images/
+function applyStageState(btn, statusValue) {
+  const s = statusValue || "none";
+  btn.dataset.status = s;
+  btn.classList.toggle("staged", s === "staging");
+  btn.classList.toggle("promoted", s === "promoted");
+  if (s === "promoted") {
+    btn.textContent = "★";
+    btn.title = "Already in training set (images/). Trash from /training to re-stage.";
+    btn.disabled = true;
+  } else if (s === "staging") {
+    btn.textContent = "✓";
+    btn.title = "Already staged. Label or trash from /training to re-stage.";
+    btn.disabled = true;
+  } else {
+    btn.textContent = "📥";
+    btn.title = "Stage this event as a training image (clean frame + pre-seeded box)";
+    btn.disabled = false;
+  }
+}
+
 function formatTime(ts) {
   const d = new Date(ts * 1000);
   // Show date if older than today, else time-of-day.
@@ -161,13 +186,21 @@ function renderEvents(events) {
     // the YOLO label with the event's peak_bbox. No navigation; the
     // button morphs to a check once done so the user can see at a
     // glance which events they've already added to the labeler.
+    // Initial state is driven by ev.training_status — staged events
+    // come back marked from a prior session.
     const stageBtn = node.querySelector(".event-stage-link");
     if (stageBtn) {
+      applyStageState(stageBtn, ev.training_status);
       stageBtn.addEventListener("click", async (e) => {
         e.preventDefault();
         e.stopPropagation();
+        if (stageBtn.dataset.status === "staging"
+            || stageBtn.dataset.status === "promoted") {
+          // Already in the training set — refuse to double-stage; the
+          // user can trash from the labeler and try again.
+          return;
+        }
         stageBtn.disabled = true;
-        const orig = stageBtn.textContent;
         stageBtn.textContent = "⏳";
         try {
           const r = await fetch(`/api/training/stage-event/${ev.id}`, {
@@ -177,20 +210,17 @@ function renderEvents(events) {
           if (!r.ok) {
             const t = await r.text();
             status.textContent = `stage failed: ${r.status} ${t}`;
-            stageBtn.textContent = orig;
-            stageBtn.disabled = false;
+            applyStageState(stageBtn, "none");
             return;
           }
           const j = await r.json();
-          stageBtn.textContent = "✓";
-          stageBtn.classList.add("staged");
+          applyStageState(stageBtn, "staging");
           status.textContent =
             `staged ${j.filename} → ${j.category}/`
             + (j.seeded_boxes ? ` (${j.seeded_boxes} box pre-seeded)` : "");
         } catch (err) {
           status.textContent = `stage error: ${err.message}`;
-          stageBtn.textContent = orig;
-          stageBtn.disabled = false;
+          applyStageState(stageBtn, "none");
         }
       });
     }

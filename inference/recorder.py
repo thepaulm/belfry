@@ -100,6 +100,11 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.executescript(_SCHEMA_FILE.read_text())
+    # Idempotent column adds for existing DBs predating the column.
+    # SQLite has no ADD COLUMN IF NOT EXISTS, so check first.
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    if "staged_filename" not in cols:
+        conn.execute("ALTER TABLE events ADD COLUMN staged_filename TEXT")
     return conn
 
 

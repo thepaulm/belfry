@@ -136,10 +136,42 @@ _CAMERA_TO_SET: dict[str, str] = {
 }
 
 
+_events_migrated = False
+
+
+def _migrate_events_db() -> None:
+    """Idempotently apply schema migrations the DVR depends on.
+
+    The inference recorder owns the canonical schema (inference/schema.sql),
+    but the DVR also writes one column — `staged_filename`, set by
+    /api/training/stage-event and cleared by the labeler's trash routes.
+    Either process may be the first to open a fresh DB, so both run the
+    same migration. SQLite has no ADD COLUMN IF NOT EXISTS, so check first.
+    """
+    global _events_migrated
+    if _events_migrated:
+        return
+    p = config.inference.db_path
+    if not p.exists():
+        return
+    try:
+        with sqlite3.connect(str(p)) as conn:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+            if not cols:
+                return  # table not created yet
+            if "staged_filename" not in cols:
+                conn.execute("ALTER TABLE events ADD COLUMN staged_filename TEXT")
+        _events_migrated = True
+    except sqlite3.OperationalError:
+        # Concurrent migrator from inference recorder; we'll retry next call.
+        pass
+
+
 def _open_events_db() -> sqlite3.Connection | None:
     p = config.inference.db_path
     if not p.exists():
         return None
+    _migrate_events_db()
     # Read-only URI mode so a stray write would fail loudly. Multi-thread
     # safe = False here is OK because the connection is request-local.
     conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
@@ -147,11 +179,77 @@ def _open_events_db() -> sqlite3.Connection | None:
     return conn
 
 
-def _event_row_to_dict(r: sqlite3.Row) -> dict:
+def _open_events_db_rw() -> sqlite3.Connection | None:
+    """Open a brief write connection for the small set of fields the DVR
+    owns (currently just `staged_filename`). Callers should commit + close
+    quickly so they don't sit on the WAL writer slot while the inference
+    recorder is trying to insert events."""
+    p = config.inference.db_path
+    if not p.exists():
+        return None
+    _migrate_events_db()
+    conn = sqlite3.connect(str(p))
+    return conn
+
+
+def _build_training_index() -> tuple[set[str], set[str]]:
+    """Return ({staging jpg names}, {promoted jpg names}).
+
+    The disk is the source of truth — a row's `staged_filename` might
+    point at a file the user has since trashed from the labeler, so we
+    confirm existence rather than trusting the DB column alone. Cheap
+    enough to do per request: a few thousand iterdir entries.
+    """
+    staging_names: set[str] = set()
+    if training.STAGING_DIR.is_dir():
+        for cat in training.STAGING_DIR.iterdir():
+            if not cat.is_dir():
+                continue
+            for p in cat.iterdir():
+                if p.suffix == ".jpg":
+                    staging_names.add(p.name)
+    promoted_names: set[str] = set()
+    if training.IMAGES_DIR.is_dir():
+        for p in training.IMAGES_DIR.iterdir():
+            if p.suffix == ".jpg":
+                promoted_names.add(p.name)
+    return staging_names, promoted_names
+
+
+def _training_status_for(
+    name: str | None,
+    staging_names: set[str],
+    promoted_names: set[str],
+) -> str:
+    """One of 'none' | 'staging' | 'promoted'.
+
+    'none' covers both never-staged and trashed-since-staged — the UI
+    treats them identically (the 📥 button is offered).
+    """
+    if not name:
+        return "none"
+    if name in promoted_names:
+        return "promoted"
+    if name in staging_names:
+        return "staging"
+    return "none"
+
+
+def _event_row_to_dict(
+    r: sqlite3.Row,
+    staging_names: set[str],
+    promoted_names: set[str],
+) -> dict:
     try:
         peak_bbox = json.loads(r["peak_bbox"])
     except (json.JSONDecodeError, TypeError):
         peak_bbox = None
+    # The column is added by _migrate_events_db on first DVR or recorder
+    # open; defensive guard in case a read races migration.
+    try:
+        staged = r["staged_filename"]
+    except (IndexError, KeyError):
+        staged = None
     return {
         "id": r["id"],
         "camera": r["camera"],
@@ -164,6 +262,7 @@ def _event_row_to_dict(r: sqlite3.Row) -> dict:
         "peak_bbox": peak_bbox,
         "sample_count": r["sample_count"],
         "thumb_url": f"/api/events/thumb/{r['id']}" if r["thumb_path"] else None,
+        "training_status": _training_status_for(staged, staging_names, promoted_names),
     }
 
 
@@ -207,7 +306,8 @@ def _query_events(
         rows = conn.execute(sql, args).fetchall()
     finally:
         conn.close()
-    return [_event_row_to_dict(r) for r in rows]
+    staging_names, promoted_names = _build_training_index()
+    return [_event_row_to_dict(r, staging_names, promoted_names) for r in rows]
 
 
 @app.get("/api/events")
@@ -706,6 +806,24 @@ async def api_training_promote(category: str, filename: str) -> dict:
     return {"promoted": True, "image": str(img_dest), "label": str(txt_dest)}
 
 
+def _clear_event_stage_pointer(filename: str) -> None:
+    """Null out events.staged_filename for any row pointing at this name,
+    so /events stops marking the source event as staged. Filename is a
+    primary key inside the training tree (jpg name is unique across
+    staging/+images/), so an unscoped UPDATE is fine."""
+    rw = _open_events_db_rw()
+    if rw is None:
+        return
+    try:
+        rw.execute(
+            "UPDATE events SET staged_filename = NULL WHERE staged_filename = ?",
+            (filename,),
+        )
+        rw.commit()
+    finally:
+        rw.close()
+
+
 @app.delete("/api/training/staging/{category}/{filename}")
 async def api_training_staging_delete(category: str, filename: str) -> dict:
     """Trash a capture entirely: removes image and any .txt sibling."""
@@ -720,6 +838,7 @@ async def api_training_staging_delete(category: str, filename: str) -> dict:
         deleted.append("txt")
     if not deleted:
         raise HTTPException(status_code=404, detail="nothing to delete")
+    _clear_event_stage_pointer(filename)
     return {"deleted": deleted}
 
 
@@ -786,6 +905,7 @@ async def api_training_promoted_delete(filename: str) -> dict:
         deleted.append("txt")
     if not deleted:
         raise HTTPException(status_code=404, detail="nothing to delete")
+    _clear_event_stage_pointer(filename)
     return {"deleted": deleted}
 
 
@@ -877,6 +997,21 @@ async def api_training_stage_event(event_id: int) -> dict:
     )
     if seeded:
         (target_dir / f"{stem}.txt").write_text("\n".join(seeded) + "\n")
+
+    # Record the staging filename back on the event so /api/events can
+    # report training_status. RW connection opened here (after the slow
+    # ffmpeg fetch) so we don't sit on the WAL writer slot while the
+    # recorder is trying to insert new rows.
+    rw = _open_events_db_rw()
+    if rw is not None:
+        try:
+            rw.execute(
+                "UPDATE events SET staged_filename = ? WHERE id = ?",
+                (img_path.name, event_id),
+            )
+            rw.commit()
+        finally:
+            rw.close()
 
     return {
         "staged": True,
