@@ -77,6 +77,14 @@ async def api_set_cameras(set_id: str) -> list[dict]:
     return [_camera_payload(c) for c in s.cameras]
 
 
+@app.get("/api/cameras")
+async def api_cameras() -> list[dict]:
+    # Flat camera index, used by the mobile Events tab to deep-link an
+    # event tap into PlaybackScreen without first walking sets to find
+    # the camera's HLS path.
+    return [_camera_payload(c) for s in config.sets for c in s.cameras]
+
+
 @app.get("/api/sets/{set_id}/health")
 async def api_set_health(set_id: str) -> list[dict]:
     s = _resolve_set(set_id)

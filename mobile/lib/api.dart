@@ -47,6 +47,48 @@ class Camera {
   );
 }
 
+class Event {
+  Event({
+    required this.id,
+    required this.camera,
+    required this.setId,
+    required this.cls,
+    required this.tsStart,
+    required this.tsEnd,
+    required this.maxConf,
+    required this.hasThumb,
+  });
+
+  final int id;
+  final String camera;
+  final String? setId;
+  final String cls;
+  final DateTime tsStart;
+  final DateTime tsEnd;
+  final double maxConf;
+  final bool hasThumb;
+
+  Duration get duration => tsEnd.difference(tsStart);
+
+  String? thumbUrl() =>
+      hasThumb ? '${AppConfig.backendBase}/api/events/thumb/$id' : null;
+
+  factory Event.fromJson(Map<String, dynamic> j) => Event(
+    id: j['id'] as int,
+    camera: j['camera'] as String,
+    setId: j['set_id'] as String?,
+    cls: j['class'] as String,
+    tsStart: DateTime.fromMillisecondsSinceEpoch(
+      ((j['ts_start'] as num).toDouble() * 1000).round(),
+    ),
+    tsEnd: DateTime.fromMillisecondsSinceEpoch(
+      ((j['ts_end'] as num).toDouble() * 1000).round(),
+    ),
+    maxConf: (j['max_conf'] as num).toDouble(),
+    hasThumb: j['thumb_url'] != null,
+  );
+}
+
 class PlaybackRange {
   PlaybackRange({required this.start, required this.duration});
 
@@ -87,9 +129,43 @@ class ApiClient {
     return (body as List).map((e) => Camera.fromJson(e)).toList();
   }
 
+  Future<List<Camera>> getAllCameras() async {
+    final body = await _getJson('/api/cameras');
+    return (body as List).map((e) => Camera.fromJson(e)).toList();
+  }
+
   Future<List<PlaybackRange>> getPlaybackList(String cam) async {
     final body = await _getJson('/api/playback/list?cam=$cam');
     return (body as List).map((e) => PlaybackRange.fromJson(e)).toList();
+  }
+
+  Future<List<Event>> getEvents({
+    String? cam,
+    String? cls,
+    DateTime? since,
+    DateTime? until,
+    int? beforeId,
+    int limit = 100,
+  }) async {
+    final p = <String, String>{'limit': '$limit'};
+    if (cam != null) p['cam'] = cam;
+    if (cls != null) p['class'] = cls;
+    if (since != null) {
+      p['since'] = (since.millisecondsSinceEpoch / 1000).toString();
+    }
+    if (until != null) {
+      p['until'] = (until.millisecondsSinceEpoch / 1000).toString();
+    }
+    if (beforeId != null) p['before_id'] = '$beforeId';
+    final uri = Uri.parse(
+      '${AppConfig.backendBase}/api/events',
+    ).replace(queryParameters: p);
+    final resp = await http.get(uri, headers: bearerHeaders());
+    if (resp.statusCode != 200) {
+      throw ApiException(resp.statusCode, resp.body);
+    }
+    final body = jsonDecode(resp.body);
+    return (body as List).map((e) => Event.fromJson(e)).toList();
   }
 
   // The video_player package handles the mp4 fetch itself — we just hand it

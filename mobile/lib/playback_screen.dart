@@ -5,15 +5,20 @@ import 'package:video_player/video_player.dart';
 
 import 'api.dart';
 import 'auth.dart';
+import 'events_screen.dart' show eventBucketColor;
 
 class PlaybackScreen extends StatefulWidget {
   const PlaybackScreen({
     super.key,
     required this.auth,
     required this.camera,
+    this.initialTs,
   });
   final AuthService auth;
   final Camera camera;
+  // Absolute timestamp to land on. Set when navigating from the Events
+  // tab so the user lands on the event's moment instead of the live edge.
+  final DateTime? initialTs;
 
   String get cameraName => camera.name;
   String get cameraLabel => camera.label;
@@ -25,13 +30,23 @@ class PlaybackScreen extends StatefulWidget {
 class _PlaybackScreenState extends State<PlaybackScreen> {
   late final ApiClient _api = ApiClient(widget.auth);
 
-  final DateTime _today = _localStartOfDay(DateTime.now());
-  late DateTime _selectedDay = _today;
+  // Visible-window model — mirrors the web playback page. _viewScale picks
+  // the visible window size; _viewStartSec is its left edge, snapped to a
+  // multiple of the span so neighboring scale steps line up.
+  static const _scaleSpans = <String, double>{
+    'day': 86400.0,
+    'hour': 3600.0,
+    '5min': 300.0,
+  };
+  String _viewScale = 'day';
+  double _viewStartSec = 0.0;
 
-  // Slider value: seconds since local start-of-day, 0..86400.
-  late double _sliderSec = _initialSliderSec();
+  final DateTime _today = _localStartOfDay(DateTime.now());
+  late DateTime _selectedDay;
+  late double _sliderSec;
 
   List<PlaybackRange> _ranges = const [];
+  List<Event> _dayEvents = const [];
   String? _loadError;
   bool _loading = true;
 
@@ -49,18 +64,73 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
   int _loadGen = 0;
   Timer? _liveTick;
 
-  double _initialSliderSec() {
-    final now = DateTime.now();
-    return now.difference(_today).inSeconds.toDouble().clamp(0.0, 86399.0);
-  }
-
   @override
   void initState() {
     super.initState();
+    final initial = widget.initialTs;
+    if (initial != null) {
+      final local = initial.toLocal();
+      _selectedDay = _localStartOfDay(local);
+      _sliderSec =
+          local.difference(_selectedDay).inSeconds.toDouble().clamp(0.0, 86399.0);
+    } else {
+      _selectedDay = _today;
+      _sliderSec =
+          DateTime.now().difference(_today).inSeconds.toDouble().clamp(0.0, 86399.0);
+    }
+    _viewStartSec = _snappedStart(_sliderSec);
     _loadList();
-    // Default entry is the live stream — the user just tapped a live tile
-    // and the past timeline is supporting context, not the primary view.
-    _enterLive();
+    _refreshDayEvents();
+    if (initial != null) {
+      _loadWindowAt(_sliderSec);
+    } else {
+      _enterLive();
+    }
+  }
+
+  double _snappedStart(double sec) {
+    final span = _scaleSpans[_viewScale]!;
+    final clamped = sec.clamp(0.0, 86399.0);
+    return (clamped / span).floor() * span;
+  }
+
+  // Sec-of-day of the live edge of _selectedDay, or null if the selected
+  // day isn't today (past days are fully available).
+  double? _liveEdgeOfSelectedDay() {
+    if (!_selectedDay.isAtSameMomentAs(_today)) return null;
+    final now = DateTime.now();
+    return now.difference(_selectedDay).inSeconds.toDouble().clamp(0.0, 86399.0);
+  }
+
+  double _scrubMinSec() {
+    final live = _liveEdgeOfSelectedDay();
+    final dayMax = live ?? 86399.0;
+    return _viewStartSec.clamp(0.0, dayMax);
+  }
+
+  double _scrubMaxSec() {
+    final span = _scaleSpans[_viewScale]!;
+    final live = _liveEdgeOfSelectedDay();
+    final dayMax = live ?? 86399.0;
+    final mn = _scrubMinSec();
+    return (_viewStartSec + span - 1).clamp(mn, dayMax);
+  }
+
+  void _setScale(String scale) {
+    if (!_scaleSpans.containsKey(scale) || scale == _viewScale) return;
+    setState(() {
+      _viewScale = scale;
+      _viewStartSec = _snappedStart(_sliderSec);
+    });
+  }
+
+  // Slide the visible window forward so it still contains `sec`. Called
+  // on live tick / playback advancement in Hour and 5-min scales.
+  void _ensureVisible(double sec) {
+    final span = _scaleSpans[_viewScale]!;
+    if (sec < _viewStartSec || sec >= _viewStartSec + span) {
+      _viewStartSec = _snappedStart(sec);
+    }
   }
 
   Future<void> _loadList() async {
@@ -77,6 +147,25 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
         _loadError = e.toString();
         _loading = false;
       });
+    }
+  }
+
+  Future<void> _refreshDayEvents() async {
+    final dayStart = _selectedDay;
+    final dayEnd = _selectedDay.add(const Duration(days: 1));
+    try {
+      final events = await _api.getEvents(
+        cam: widget.cameraName,
+        since: dayStart,
+        until: dayEnd,
+        limit: 500,
+      );
+      if (!mounted) return;
+      // Drop stale results if the day changed between request and reply.
+      if (!_selectedDay.isAtSameMomentAs(dayStart)) return;
+      setState(() => _dayEvents = events);
+    } catch (_) {
+      // Soft-fail: events are an enhancement, not load-bearing for playback.
     }
   }
 
@@ -103,25 +192,17 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
     final start = _absoluteTime(sliderSec);
     final now = DateTime.now();
 
-    // Snap to live whenever the 5-min mp4 window would extend past now.
-    // MediaMTX can't serve frames it hasn't recorded yet, and a window that
-    // straddles the live edge errors instead of returning a partial mp4.
     if (start.add(_windowDuration).isAfter(now.subtract(_liveSnapWindow))) {
       await _enterLive();
       return;
     }
 
     if (!_absTimeHasFootage(start)) {
-      // Slider landed in a gap or before retention. Skip the fetch — the
-      // server's 404 surfaces in video_player as an opaque PlatformException.
       await _stopPlayer();
       setState(() => _playerError = 'no footage at this time');
       return;
     }
 
-    // If the new time falls inside the loaded window, seek instead of
-    // refetching — saves a roundtrip and the iOS-Safari cache step on the
-    // server side.
     final cur = _player;
     final wStart = _windowStart;
     if (!_isLive &&
@@ -146,7 +227,11 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
 
     final uri = _api.playbackMp4Uri(widget.cameraName, start, _windowDuration);
     final headers = _api.bearerHeaders();
-    final c = VideoPlayerController.networkUrl(uri, httpHeaders: headers);
+    final c = VideoPlayerController.networkUrl(
+      uri,
+      httpHeaders: headers,
+      videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
+    );
     try {
       await c.initialize();
       if (!mounted || gen != _loadGen) {
@@ -192,19 +277,17 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
   }
 
   Future<void> _enterLive({int attempt = 0}) async {
-    // Already streaming live and healthy — don't tear down the working
-    // controller just to re-init it.
     final cur = _player;
     if (_isLive &&
         cur != null &&
         cur.value.isInitialized &&
         !cur.value.hasError) {
-      // Make sure the cursor is pinned to now even on a no-op call.
       final now = DateTime.now();
       setState(() {
         _selectedDay = _today;
         _sliderSec =
             now.difference(_today).inSeconds.toDouble().clamp(0.0, 86399.0);
+        _ensureVisible(_sliderSec);
       });
       return;
     }
@@ -220,15 +303,18 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
       _playerLoading = true;
       _playerError = null;
       _selectedDay = _today;
-      _sliderSec = DateTime.now().difference(_today).inSeconds.toDouble().clamp(
-            0.0,
-            86399.0,
-          );
+      _sliderSec = DateTime.now()
+          .difference(_today)
+          .inSeconds
+          .toDouble()
+          .clamp(0.0, 86399.0);
+      _ensureVisible(_sliderSec);
     });
 
     final c = VideoPlayerController.networkUrl(
       Uri.parse(hls),
       httpHeaders: _api.bearerHeaders(),
+      videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
     );
     try {
       await c.initialize();
@@ -255,17 +341,18 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
         if (!mounted || !_isLive || _userScrubbing) return;
         final now = DateTime.now();
         final today = _localStartOfDay(now);
+        final crossedMidnight = !today.isAtSameMomentAs(_selectedDay);
         setState(() {
-          if (!today.isAtSameMomentAs(_selectedDay)) _selectedDay = today;
+          if (crossedMidnight) _selectedDay = today;
           _sliderSec =
               now.difference(today).inSeconds.toDouble().clamp(0.0, 86399.0);
+          _ensureVisible(_sliderSec);
         });
+        if (crossedMidnight) _refreshDayEvents();
       });
     } catch (e) {
       await c.dispose();
       if (!mounted || gen != _loadGen) return;
-      // Live HLS init can flake on first try — MediaMTX takes a beat to
-      // mux a playlist after the path comes up. One quick retry covers it.
       if (attempt == 0) {
         await Future<void>.delayed(const Duration(seconds: 1));
         if (!mounted || gen != _loadGen) return;
@@ -289,13 +376,27 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
       return;
     }
     if (_userScrubbing) return;
-    // Cursor follows the playing video. Clamp to the selected day so the
-    // slider stays valid when a window straddles midnight.
     final absolute = wStart.add(c.value.position);
     final sec = absolute.difference(_selectedDay).inMilliseconds / 1000.0;
     if (sec < 0 || sec > 86400) return;
     if ((sec - _sliderSec).abs() < 0.05) return;
-    setState(() => _sliderSec = sec);
+    setState(() {
+      _sliderSec = sec;
+      _ensureVisible(sec);
+    });
+  }
+
+  void _selectDay(DateTime d) {
+    if (d.isAtSameMomentAs(_selectedDay)) return;
+    setState(() {
+      _selectedDay = d;
+      // Center the visible window — for past days that means start-of-day;
+      // user can scrub to whatever they want from there.
+      _viewStartSec = 0.0;
+      _sliderSec = 0.0;
+      _dayEvents = const [];
+    });
+    _refreshDayEvents();
   }
 
   @override
@@ -315,8 +416,8 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
       final s = r.start.isBefore(dayStart) ? dayStart : r.start;
       final e = r.end.isAfter(dayEnd) ? dayEnd : r.end;
       out.add(_Segment(
-        startFrac: s.difference(dayStart).inMilliseconds / 1000 / 86400,
-        endFrac: e.difference(dayStart).inMilliseconds / 1000 / 86400,
+        startSec: s.difference(dayStart).inMilliseconds / 1000.0,
+        endSec: e.difference(dayStart).inMilliseconds / 1000.0,
       ));
     }
     return out;
@@ -324,6 +425,7 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final dayStartUnix = _selectedDay.millisecondsSinceEpoch / 1000.0;
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.cameraLabel),
@@ -352,14 +454,33 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
                       today: _today,
                       selectedDay: _selectedDay,
                       hasFootage: _dayHasFootage,
-                      onSelect: (d) => setState(() => _selectedDay = d),
+                      onSelect: _selectDay,
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 4),
+                    _ScaleBar(
+                      scale: _viewScale,
+                      onScale: _setScale,
+                    ),
+                    const SizedBox(height: 4),
                     _Timeline(
                       sliderSec: _sliderSec,
+                      minSec: _scrubMinSec(),
+                      maxSec: _scrubMaxSec(),
                       segments: _segmentsForSelectedDay(),
+                      events: _dayEvents,
+                      dayStartUnix: dayStartUnix,
                       timeLabel: _formatHms(_sliderSec),
                       isLive: _isLive,
+                      onPipTap: (ts) {
+                        final sec = ts.difference(_selectedDay).inMilliseconds /
+                            1000.0;
+                        if (sec < 0 || sec > 86399) return;
+                        setState(() {
+                          _sliderSec = sec;
+                          _ensureVisible(sec);
+                        });
+                        _loadWindowAt(sec);
+                      },
                       onChangeStart: (_) => _userScrubbing = true,
                       onChanged: (v) => setState(() => _sliderSec = v),
                       onChangeEnd: (v) {
@@ -426,9 +547,9 @@ String _formatHms(double sec) {
 }
 
 class _Segment {
-  const _Segment({required this.startFrac, required this.endFrac});
-  final double startFrac;
-  final double endFrac;
+  const _Segment({required this.startSec, required this.endSec});
+  final double startSec;
+  final double endSec;
 }
 
 class _DayStrip extends StatelessWidget {
@@ -451,7 +572,7 @@ class _DayStrip extends StatelessWidget {
       height: 64,
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
-        reverse: true, // today (i=0) lands on the right
+        reverse: true,
         padding: const EdgeInsets.symmetric(horizontal: 8),
         itemCount: 14,
         itemBuilder: (ctx, i) {
@@ -507,30 +628,67 @@ class _DayStrip extends StatelessWidget {
   }
 }
 
+class _ScaleBar extends StatelessWidget {
+  const _ScaleBar({required this.scale, required this.onScale});
+  final String scale;
+  final ValueChanged<String> onScale;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 24),
+      child: SegmentedButton<String>(
+        showSelectedIcon: false,
+        style: const ButtonStyle(
+          visualDensity: VisualDensity.compact,
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+        segments: const [
+          ButtonSegment(value: 'day', label: Text('Day')),
+          ButtonSegment(value: 'hour', label: Text('Hour')),
+          ButtonSegment(value: '5min', label: Text('5 min')),
+        ],
+        selected: {scale},
+        onSelectionChanged: (s) => onScale(s.first),
+      ),
+    );
+  }
+}
+
 class _Timeline extends StatelessWidget {
   const _Timeline({
     required this.sliderSec,
+    required this.minSec,
+    required this.maxSec,
     required this.segments,
+    required this.events,
+    required this.dayStartUnix,
     required this.timeLabel,
     required this.isLive,
+    required this.onPipTap,
     required this.onChangeStart,
     required this.onChanged,
     required this.onChangeEnd,
   });
   final double sliderSec;
+  final double minSec;
+  final double maxSec;
   final List<_Segment> segments;
+  final List<Event> events;
+  final double dayStartUnix;
   final String timeLabel;
   final bool isLive;
+  final ValueChanged<DateTime> onPipTap;
   final ValueChanged<double> onChangeStart;
   final ValueChanged<double> onChanged;
   final ValueChanged<double> onChangeEnd;
 
-  static const _dayLen = 86400.0;
   static const _horizontalInset = 20.0;
   static const _thumbRadius = 10.0;
 
   @override
   Widget build(BuildContext context) {
+    final range = (maxSec - minSec).clamp(1.0, 86400.0);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -576,8 +734,10 @@ class _Timeline extends StatelessWidget {
         LayoutBuilder(builder: (ctx, c) {
           final width = c.maxWidth;
           final usable = width - 2 * (_horizontalInset + _thumbRadius);
-          final cursorX =
-              _horizontalInset + _thumbRadius + (sliderSec / _dayLen) * usable;
+          final clampedSlider = sliderSec.clamp(minSec, maxSec);
+          final cursorX = _horizontalInset +
+              _thumbRadius +
+              ((clampedSlider - minSec) / range) * usable;
           return SizedBox(
             height: 52,
             child: Stack(
@@ -592,10 +752,17 @@ class _Timeline extends StatelessWidget {
                   child: SizedBox(
                     height: 8,
                     child: CustomPaint(
-                      painter: _AvailabilityPainter(segments),
+                      painter: _AvailabilityPainter(
+                        segments: segments,
+                        minSec: minSec,
+                        maxSec: maxSec,
+                      ),
                     ),
                   ),
                 ),
+                // Event pips — one tappable colored bar per overlapping
+                // event, drawn over the availability strip. Tap → seek.
+                ..._buildPips(usable: usable, range: range),
                 // Vertical orange cursor line.
                 Positioned(
                   left: cursorX - 1,
@@ -621,9 +788,9 @@ class _Timeline extends StatelessWidget {
                         trackHeight: 0,
                       ),
                       child: Slider(
-                        min: 0,
-                        max: _dayLen,
-                        value: sliderSec.clamp(0.0, _dayLen),
+                        min: minSec,
+                        max: maxSec <= minSec ? minSec + 1 : maxSec,
+                        value: clampedSlider,
                         onChangeStart: onChangeStart,
                         onChanged: onChanged,
                         onChangeEnd: onChangeEnd,
@@ -638,11 +805,52 @@ class _Timeline extends StatelessWidget {
       ],
     );
   }
+
+  List<Widget> _buildPips({required double usable, required double range}) {
+    final out = <Widget>[];
+    for (final ev in events) {
+      final startSec = ev.tsStart.millisecondsSinceEpoch / 1000.0 - dayStartUnix;
+      final endSec = ev.tsEnd.millisecondsSinceEpoch / 1000.0 - dayStartUnix;
+      if (endSec < minSec || startSec > maxSec) continue;
+      final clampedStart = startSec.clamp(minSec, maxSec);
+      final clampedEnd = endSec.clamp(minSec, maxSec);
+      final left = _horizontalInset +
+          _thumbRadius +
+          ((clampedStart - minSec) / range) * usable;
+      var w = ((clampedEnd - clampedStart) / range) * usable;
+      // Single-frame events would otherwise be 0 wide; floor at a hairline
+      // so they're still tappable.
+      if (w < 3) w = 3;
+      out.add(Positioned(
+        left: left,
+        top: 18,
+        width: w,
+        height: 16,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => onPipTap(ev.tsStart),
+          child: Container(
+            decoration: BoxDecoration(
+              color: eventBucketColor(ev.cls).withValues(alpha: 0.85),
+              borderRadius: BorderRadius.circular(1.5),
+            ),
+          ),
+        ),
+      ));
+    }
+    return out;
+  }
 }
 
 class _AvailabilityPainter extends CustomPainter {
-  _AvailabilityPainter(this.segments);
+  _AvailabilityPainter({
+    required this.segments,
+    required this.minSec,
+    required this.maxSec,
+  });
   final List<_Segment> segments;
+  final double minSec;
+  final double maxSec;
 
   static const _trackColor = Color(0xff4a525c);
   static const _segmentColor = Color(0xff9fb3c8);
@@ -655,9 +863,13 @@ class _AvailabilityPainter extends CustomPainter {
       Paint()..color = _trackColor,
     );
     final paint = Paint()..color = _segmentColor;
+    final range = (maxSec - minSec).clamp(1.0, 86400.0);
     for (final s in segments) {
-      final left = s.startFrac.clamp(0.0, 1.0) * size.width;
-      final right = s.endFrac.clamp(0.0, 1.0) * size.width;
+      if (s.endSec < minSec || s.startSec > maxSec) continue;
+      final left =
+          ((s.startSec.clamp(minSec, maxSec) - minSec) / range) * size.width;
+      final right =
+          ((s.endSec.clamp(minSec, maxSec) - minSec) / range) * size.width;
       final w = (right - left).clamp(1.0, size.width);
       canvas.drawRRect(
         RRect.fromRectAndRadius(
