@@ -6,6 +6,7 @@ import 'package:video_player/video_player.dart';
 import 'api.dart';
 import 'auth.dart';
 import 'events_screen.dart' show eventBucketColor;
+import 'inference_overlay.dart';
 
 class PlaybackScreen extends StatefulWidget {
   const PlaybackScreen({
@@ -63,6 +64,16 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
   bool _isLive = false;
   int _loadGen = 0;
   Timer? _liveTick;
+
+  // Inference overlay. _inferenceLive handles live mode (continuous SSE),
+  // _inferencePast handles past-mode re-inference (one-shot SSE per window
+  // with ts→frame lookup). Only one is active at a time.
+  bool _labelsOn = false;
+  InferenceLiveClient? _inferenceLive;
+  StreamSubscription<List<Detection>>? _inferenceLiveSub;
+  InferencePlaybackClient? _inferencePast;
+  StreamSubscription<void>? _inferencePastSub;
+  List<Detection> _detections = const [];
 
   @override
   void initState() {
@@ -189,6 +200,9 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
   }
 
   Future<void> _loadWindowAt(double sliderSec) async {
+    debugPrint(
+      '[belfry][pb:${widget.cameraName}] loadWindowAt sliderSec=${sliderSec.toStringAsFixed(1)}',
+    );
     final start = _absoluteTime(sliderSec);
     final now = DateTime.now();
 
@@ -221,9 +235,13 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
       _playerLoading = true;
       _playerError = null;
       _isLive = false;
+      _detections = const [];
     });
     _liveTick?.cancel();
     _liveTick = null;
+    // Switching to a past window — tear down the live inference stream;
+    // the past client for the new window starts after init succeeds.
+    _stopLiveInference();
 
     final uri = _api.playbackMp4Uri(widget.cameraName, start, _windowDuration);
     final headers = _api.bearerHeaders();
@@ -252,6 +270,10 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
         old.removeListener(_onPlayerUpdate);
         unawaited(old.dispose());
       }
+      // Past mp4 is ready — kick off re-inference for this window if
+      // labels are on. _refreshInference is idempotent and picks the
+      // past client for this _windowStart.
+      _refreshInference();
     } catch (e) {
       await c.dispose();
       if (!mounted || gen != _loadGen) return;
@@ -336,6 +358,7 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
         unawaited(old.dispose());
       }
 
+      _refreshInference();
       _liveTick?.cancel();
       _liveTick = Timer.periodic(const Duration(seconds: 1), (_) {
         if (!mounted || !_isLive || _userScrubbing) return;
@@ -370,6 +393,9 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
     final wStart = _windowStart;
     if (c == null || wStart == null || !c.value.isInitialized) return;
     if (c.value.hasError) {
+      debugPrint(
+        '[belfry][pb:${widget.cameraName}] player error: ${c.value.errorDescription}',
+      );
       setState(() {
         _playerError = c.value.errorDescription ?? 'playback error';
       });
@@ -377,6 +403,10 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
     }
     if (_userScrubbing) return;
     final absolute = wStart.add(c.value.position);
+    // Past-mode overlay tracks the playhead: every position tick we look
+    // up the box sample closest to the absolute play time. This is cheap
+    // (binary search over a few hundred samples per window).
+    _updatePastDetections();
     final sec = absolute.difference(_selectedDay).inMilliseconds / 1000.0;
     if (sec < 0 || sec > 86400) return;
     if ((sec - _sliderSec).abs() < 0.05) return;
@@ -399,9 +429,123 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
     _refreshDayEvents();
   }
 
+  void _setLabelsOn(bool on) {
+    if (on == _labelsOn) return;
+    debugPrint('[belfry][pb:${widget.cameraName}] labels=$on isLive=$_isLive');
+    setState(() {
+      _labelsOn = on;
+      if (!on) _detections = const [];
+    });
+    if (on) {
+      _refreshInference();
+    } else {
+      _stopAllInference();
+    }
+  }
+
+  /// Idempotent: spin up the right inference client for the current state
+  /// (or none). Called whenever _isLive, _windowStart, or _labelsOn change.
+  void _refreshInference() {
+    if (!_labelsOn || !widget.camera.enabled) {
+      _stopAllInference();
+      return;
+    }
+    if (_isLive) {
+      _stopPastInference();
+      _startLiveInference();
+    } else if (_windowStart != null) {
+      _stopLiveInference();
+      _startPastInference(_windowStart!);
+    } else {
+      _stopAllInference();
+    }
+  }
+
+  void _startLiveInference() {
+    if (_inferenceLive != null) return;
+    final c = InferenceLiveClient(auth: widget.auth, cam: widget.cameraName);
+    _inferenceLive = c;
+    _inferenceLiveSub = c.stream.listen((dets) {
+      if (!mounted) return;
+      setState(() => _detections = dets);
+    });
+    c.start();
+  }
+
+  void _startPastInference(DateTime start) {
+    // If the existing past client already covers this window, leave it
+    // alone — re-creating would drop already-buffered samples.
+    if (_inferencePast != null &&
+        _inferencePast!.windowStart.isAtSameMomentAs(start) &&
+        _inferencePast!.duration == _windowDuration) {
+      return;
+    }
+    _stopPastInference();
+    final c = InferencePlaybackClient(
+      auth: widget.auth,
+      cam: widget.cameraName,
+      windowStart: start,
+      duration: _windowDuration,
+    );
+    _inferencePast = c;
+    _inferencePastSub = c.onUpdate.listen((_) {
+      // New samples arrived — refresh the overlay to whatever sample is
+      // closest to the player's current position.
+      _updatePastDetections();
+    });
+    c.start();
+  }
+
+  void _updatePastDetections() {
+    final c = _player;
+    final wStart = _windowStart;
+    final inf = _inferencePast;
+    if (!_labelsOn || _isLive || c == null || wStart == null || inf == null) {
+      return;
+    }
+    final absUnix =
+        (wStart.add(c.value.position).millisecondsSinceEpoch) / 1000.0;
+    final boxes = inf.boxesNear(absUnix);
+    if (!_detectionsEqual(boxes, _detections)) {
+      setState(() => _detections = boxes);
+    }
+  }
+
+  void _stopLiveInference() {
+    _inferenceLiveSub?.cancel();
+    _inferenceLiveSub = null;
+    _inferenceLive?.dispose();
+    _inferenceLive = null;
+  }
+
+  void _stopPastInference() {
+    _inferencePastSub?.cancel();
+    _inferencePastSub = null;
+    _inferencePast?.dispose();
+    _inferencePast = null;
+  }
+
+  void _stopAllInference() {
+    _stopLiveInference();
+    _stopPastInference();
+    if (_detections.isNotEmpty && mounted) {
+      setState(() => _detections = const []);
+    }
+  }
+
+  // The past client returns the same List instance for repeated lookups
+  // in the same sample window, so reference equality is enough to avoid
+  // pointless setState churn. When both are empty we also skip the
+  // rebuild (an empty const list match would compare unequal by identity).
+  bool _detectionsEqual(List<Detection> a, List<Detection> b) {
+    if (identical(a, b)) return true;
+    return a.isEmpty && b.isEmpty;
+  }
+
   @override
   void dispose() {
     _liveTick?.cancel();
+    _stopAllInference();
     _player?.removeListener(_onPlayerUpdate);
     _player?.dispose();
     super.dispose();
@@ -430,6 +574,13 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
       appBar: AppBar(
         title: Text(widget.cameraLabel),
         actions: [
+          IconButton(
+            icon: Icon(_labelsOn
+                ? Icons.visibility
+                : Icons.visibility_off_outlined),
+            tooltip: _labelsOn ? 'Hide labels' : 'Show labels',
+            onPressed: () => _setLabelsOn(!_labelsOn),
+          ),
           IconButton(
             icon: const Icon(Icons.sensors),
             tooltip: 'Go Live',
@@ -526,9 +677,27 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
         style: TextStyle(color: Colors.white38, fontSize: 12),
       );
     }
+    final ar = c.value.aspectRatio == 0 ? 16 / 9 : c.value.aspectRatio;
+    // Labels render in both live and past modes now — past mode uses the
+    // playback re-inference SSE with ts→frame lookup.
+    final showOverlay = _labelsOn && _detections.isNotEmpty;
+    // Keep the original AspectRatio → VideoPlayer tree when no overlay
+    // would render. Wrapping in a Stack with StackFit.expand even when
+    // empty appears to perturb the video_player texture sizing path on
+    // Android — saw maxImages buffer exhaustion in logcat under that
+    // tree shape.
+    if (!showOverlay) {
+      return AspectRatio(aspectRatio: ar, child: VideoPlayer(c));
+    }
     return AspectRatio(
-      aspectRatio: c.value.aspectRatio == 0 ? 16 / 9 : c.value.aspectRatio,
-      child: VideoPlayer(c),
+      aspectRatio: ar,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          VideoPlayer(c),
+          BoxOverlay(detections: _detections),
+        ],
+      ),
     );
   }
 }

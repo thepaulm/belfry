@@ -5,6 +5,7 @@ import 'package:video_player/video_player.dart';
 
 import 'api.dart';
 import 'auth.dart';
+import 'inference_overlay.dart';
 import 'playback_screen.dart';
 
 class LiveGridScreen extends StatefulWidget {
@@ -25,6 +26,9 @@ class LiveGridScreen extends StatefulWidget {
 class _LiveGridScreenState extends State<LiveGridScreen> {
   late final ApiClient _api = ApiClient(widget.auth);
   Future<List<Camera>>? _camerasFuture;
+  // Session-only toggle, matches the web's behavior — labels default OFF
+  // each navigation so the user opts in once per session.
+  final ValueNotifier<bool> _labelsOn = ValueNotifier<bool>(false);
 
   @override
   void initState() {
@@ -33,9 +37,29 @@ class _LiveGridScreenState extends State<LiveGridScreen> {
   }
 
   @override
+  void dispose() {
+    _labelsOn.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(widget.setLabel)),
+      appBar: AppBar(
+        title: Text(widget.setLabel),
+        actions: [
+          ValueListenableBuilder<bool>(
+            valueListenable: _labelsOn,
+            builder: (ctx, on, _) => IconButton(
+              icon: Icon(on
+                  ? Icons.visibility
+                  : Icons.visibility_off_outlined),
+              tooltip: on ? 'Hide labels' : 'Show labels',
+              onPressed: () => _labelsOn.value = !on,
+            ),
+          ),
+        ],
+      ),
       body: FutureBuilder<List<Camera>>(
         future: _camerasFuture,
         builder: (context, snap) {
@@ -59,6 +83,7 @@ class _LiveGridScreenState extends State<LiveGridScreen> {
             itemBuilder: (context, i) => _LiveTile(
               auth: widget.auth,
               camera: cameras[i],
+              labelsOn: _labelsOn,
             ),
           );
         },
@@ -68,9 +93,14 @@ class _LiveGridScreenState extends State<LiveGridScreen> {
 }
 
 class _LiveTile extends StatefulWidget {
-  const _LiveTile({required this.auth, required this.camera});
+  const _LiveTile({
+    required this.auth,
+    required this.camera,
+    required this.labelsOn,
+  });
   final AuthService auth;
   final Camera camera;
+  final ValueNotifier<bool> labelsOn;
 
   @override
   State<_LiveTile> createState() => _LiveTileState();
@@ -95,10 +125,48 @@ class _LiveTileState extends State<_LiveTile> {
   Timer? _retryTimer;
   bool _disposed = false;
 
+  // Inference overlay state. The SSE client is only created/started while
+  // the labels toggle is on; otherwise we hold no socket per tile.
+  InferenceLiveClient? _inference;
+  StreamSubscription<List<Detection>>? _inferenceSub;
+  List<Detection> _detections = const [];
+
   @override
   void initState() {
     super.initState();
     _initController();
+    widget.labelsOn.addListener(_onLabelsToggle);
+    if (widget.labelsOn.value && widget.camera.enabled) {
+      _startInference();
+    }
+  }
+
+  void _onLabelsToggle() {
+    if (_disposed) return;
+    if (widget.labelsOn.value) {
+      if (widget.camera.enabled) _startInference();
+    } else {
+      _stopInference();
+    }
+  }
+
+  void _startInference() {
+    if (_inference != null) return;
+    final c = InferenceLiveClient(auth: widget.auth, cam: widget.camera.name);
+    _inference = c;
+    _inferenceSub = c.stream.listen((dets) {
+      if (!mounted) return;
+      setState(() => _detections = dets);
+    });
+    c.start();
+  }
+
+  void _stopInference() {
+    _inferenceSub?.cancel();
+    _inferenceSub = null;
+    _inference?.dispose();
+    _inference = null;
+    if (mounted) setState(() => _detections = const []);
   }
 
   Future<void> _initController() async {
@@ -211,6 +279,8 @@ class _LiveTileState extends State<_LiveTile> {
   @override
   void dispose() {
     _disposed = true;
+    widget.labelsOn.removeListener(_onLabelsToggle);
+    _stopInference();
     _retryTimer?.cancel();
     _controller?.removeListener(_onControllerUpdate);
     _controller?.dispose();
@@ -236,6 +306,8 @@ class _LiveTileState extends State<_LiveTile> {
             fit: StackFit.expand,
             children: [
               _videoOrPlaceholder(),
+              if (_detections.isNotEmpty)
+                Positioned.fill(child: BoxOverlay(detections: _detections)),
               Positioned(
                 left: 6,
                 bottom: 4,
