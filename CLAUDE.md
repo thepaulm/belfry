@@ -176,9 +176,10 @@ names:
   82: raccoon     # new
   83: rabbit      # new
   84: squirrel    # new
+  85: rat         # new
 ```
 
-Sparse ids are fine for Ultralytics — it skips unused slots during training. We pay this complexity because the fine-tune strategy (see below) extends YOLO11l's pretrained 80-class head by appending new neurons for ids 80, 81, 82, …, and weight-transferring the pretrained channels for ids 0..79 verbatim. That only works if our ids match COCO's. New wildlife classes get the next free id (85, 86, …) to keep the head extension a clean append. The labeler dropdowns show real ids (not array indices); `load_class_map()` returns `(id, name)` pairs.
+Sparse ids are fine for Ultralytics — it skips unused slots during training. We pay this complexity because the fine-tune strategy (see below) extends YOLO11l's pretrained 80-class head by appending new neurons for ids 80, 81, 82, …, and weight-transferring the pretrained channels for ids 0..79 verbatim. That only works if our ids match COCO's. New wildlife classes get the next free id (86, 87, …) to keep the head extension a clean append. The labeler dropdowns show real ids (not array indices); `load_class_map()` returns `(id, name)` pairs.
 
 ### How frames get into staging
 
