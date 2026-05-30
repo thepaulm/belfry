@@ -5,7 +5,7 @@ The Flutter app does native Google Sign-In, gets an ID token, POSTs it to
 request via `Authorization: Bearer`. The cookie/oauth2-proxy path used by
 the browser is untouched; bearer is an additive second front door.
 
-Trust chain on the public path (`yellowchicken.io`):
+Trust chain on the public path (`example.com`):
   app -> Caddy -> (sees Authorization: Bearer, forward_auths to /auth/verify
                    instead of oauth2-proxy) -> tunnel -> Orin nginx -> upstream
 

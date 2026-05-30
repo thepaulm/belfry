@@ -7,11 +7,11 @@
 #   sudo ./install-ec2.sh
 #
 # Before running:
-#   - yellowchicken.io must already resolve to this EC2's EIP (Caddy uses
+#   - example.com must already resolve to this EC2's EIP (Caddy uses
 #     HTTP-01 to get the cert; the cert request fails otherwise).
 #   - You must have a Google OAuth client (Web type) created at
 #     https://console.cloud.google.com/apis/credentials with redirect URI
-#     https://yellowchicken.io/oauth2/callback. Drop client_id /
+#     https://example.com/oauth2/callback. Drop client_id /
 #     client_secret into /etc/oauth2-proxy/oauth2-proxy.env.
 #   - The autossh tunnel from the Orin must be up (or this box won't have
 #     anything to reverse-proxy to). Caddy will start anyway and serve 502
@@ -100,4 +100,4 @@ echo "Done. Verify:"
 echo "  - /etc/oauth2-proxy/oauth2-proxy.env has client_id/secret/cookie_secret"
 echo "  - /etc/oauth2-proxy/emails lists the two allowed users"
 echo "  - sudo systemctl restart oauth2-proxy after editing those"
-echo "  - https://yellowchicken.io should redirect to Google login"
+echo "  - https://example.com should redirect to Google login"

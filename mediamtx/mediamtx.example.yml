@@ -56,7 +56,7 @@ paths:
     rtspTransport: tcp
     sourceOnDemand: no
     record: yes
-    recordPath: /home/paulm/code/belfry/recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+    recordPath: /home/youruser/code/belfry/recordings/%path/%Y-%m-%d_%H-%M-%S-%f
     recordFormat: fmp4
     recordSegmentDuration: 1h
     recordPartDuration: 1s
@@ -68,7 +68,7 @@ paths:
   #   rtspTransport: tcp
   #   sourceOnDemand: no
   #   record: yes
-  #   recordPath: /home/paulm/code/belfry/recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  #   recordPath: /home/youruser/code/belfry/recordings/%path/%Y-%m-%d_%H-%M-%S-%f
   #   recordFormat: fmp4
   #   recordSegmentDuration: 1h
   #   recordPartDuration: 1s

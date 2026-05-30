@@ -1,9 +1,9 @@
 """Training-data staging helpers for the /api/training/capture endpoint
 and the labeler.
 
-Layout:
+Layout (rooted at $BELFRY_TRAINING_ROOT, default ~/belfry-training):
 
-    /home/paulm/belfry-training/
+    belfry-training/
         dataset.yaml           # Ultralytics dataset spec — source of truth
                                # for class id ↔ name (COCO-aligned sparse ids)
         staging/
@@ -31,10 +31,14 @@ classes verbatim.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
-TRAINING_ROOT = Path("/home/paulm/belfry-training")
+# Override with $BELFRY_TRAINING_ROOT; defaults to ~/belfry-training.
+TRAINING_ROOT = Path(
+    os.environ.get("BELFRY_TRAINING_ROOT", Path.home() / "belfry-training")
+)
 STAGING_DIR = TRAINING_ROOT / "staging"
 IMAGES_DIR = TRAINING_ROOT / "images"
 LABELS_DIR = TRAINING_ROOT / "labels"

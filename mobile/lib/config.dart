@@ -4,7 +4,7 @@
 // public part of a Google OAuth web client — but treating it as build
 // config keeps it out of the repo).
 class AppConfig {
-  static const String backendBase = 'https://yellowchicken.io';
+  static const String backendBase = 'https://example.com';
 
   // The Web OAuth client ID is what Google embeds as the ID token `aud`,
   // and what the backend's BELFRY_GOOGLE_CLIENT_IDS allow-list checks.

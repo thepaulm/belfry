@@ -8,11 +8,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=paulm
-Group=paulm
-WorkingDirectory=/home/paulm/code/belfry
-Environment=PATH=/home/paulm/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/home/paulm/code/belfry/scripts/run-inference.sh
+User=youruser
+Group=youruser
+WorkingDirectory=/home/youruser/code/belfry
+Environment=PATH=/home/youruser/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/youruser/code/belfry/scripts/run-inference.sh
 # Generous stop timeout: each recorder thread needs to release its
 # capture, flush in-flight event runs, and close its SQLite handle.
 KillMode=mixed

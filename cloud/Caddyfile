@@ -1,4 +1,4 @@
-yellowchicken.io {
+example.com {
 	# /oauth2/* (callback, sign_in, start, sign_out) IS the auth provider —
 	# must not be gated by forward_auth or we'd loop on the login URL itself.
 	handle /oauth2/* {

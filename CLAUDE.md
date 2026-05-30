@@ -1,6 +1,6 @@
 # belfry
 
-Self-hosted DVR for Interlogix TVB-5301 cameras (OEM Hikvision) on a dedicated, isolated camera subnet. The on-prem Jetson Orin pulls RTSP from each camera, MediaMTX repackages to HLS for live viewing and writes 1-hour fMP4 segments to disk for recording, and a small FastAPI service serves a per-set browser viewer plus a per-camera scrubback page. nginx fronts everything on port 80 for LAN access. A small EC2 frontdoor (Caddy + oauth2-proxy) terminates HTTPS for `yellowchicken.io`, gates every request behind Google OAuth, and reverse-proxies through a persistent SSH tunnel back to the Orin — so all video and recordings stay on the Orin while the public side enforces auth.
+Self-hosted DVR for Interlogix TVB-5301 cameras (OEM Hikvision) on a dedicated, isolated camera subnet. The on-prem Jetson Orin pulls RTSP from each camera, MediaMTX repackages to HLS for live viewing and writes 1-hour fMP4 segments to disk for recording, and a small FastAPI service serves a per-set browser viewer plus a per-camera scrubback page. nginx fronts everything on port 80 for LAN access. A small EC2 frontdoor (Caddy + oauth2-proxy) terminates HTTPS for `example.com`, gates every request behind Google OAuth, and reverse-proxies through a persistent SSH tunnel back to the Orin — so all video and recordings stay on the Orin while the public side enforces auth.
 
 ## Layout
 
@@ -59,7 +59,7 @@ The MediaMTX `playback` (`:9996`) and `api` (`:9997`) endpoints are loopback-onl
 
 ## Cloud frontdoor
 
-`yellowchicken.io` resolves to a small EC2 instance (Amazon Linux 2023 x86_64, us-west-2). It runs two services:
+`example.com` resolves to a small EC2 instance (Amazon Linux 2023 x86_64, us-west-2). It runs two services:
 
 - **Caddy** (`/etc/caddy/Caddyfile`, systemd unit `caddy.service`) — listens on `:443`, auto-issues Let's Encrypt certs. `forward_auth 127.0.0.1:4180` (oauth2-proxy's `/oauth2/auth`) lives inside the catch-all `handle` block (not at the site-block top level) because Caddy's default directive order runs `handle` before `forward_auth`; at the top level the catch-all handle would terminate the request before the gate ever ran. Inside `forward_auth`, a `handle_response @bad-status` block intercepts oauth2-proxy's 401 and `redir * /oauth2/start?rd={uri} 302` redirects the browser into the Google login flow — note the explicit `*` matcher: `redir [<matcher>] <to> [<code>]` treats a leading-`/` first arg as an implicit path matcher, so without `*` the URL gets parsed as a never-matching matcher and the gate silently fails open. Authenticated requests reverse-proxy to `127.0.0.1:8080` (the tunnel).
 - **oauth2-proxy** (`/etc/oauth2-proxy/oauth2-proxy.cfg`, systemd unit `oauth2-proxy.service`) — bound `127.0.0.1:4180`, Google provider. Allow-listed emails live in `/etc/oauth2-proxy/emails`. Secrets (client_id/secret, cookie_secret) in `/etc/oauth2-proxy/oauth2-proxy.env`, read by the systemd unit's `EnvironmentFile=`.
@@ -67,7 +67,7 @@ The MediaMTX `playback` (`:9996`) and `api` (`:9997`) endpoints are loopback-onl
 The reverse SSH tunnel runs on the **Orin**, outbound to EC2 (autossh, `belfry-tunnel.service`). Two `-R` forwards land on EC2's loopback (`GatewayPorts no` keeps them off the public interface):
 
 - `127.0.0.1:8080` → Orin `:80` — the upstream Caddy reverse-proxies into.
-- `127.0.0.1:2222` → Orin `:22` — `ssh -J paulm@yellowchicken.io paulm@127.0.0.1 -p 2222` from a laptop while travelling.
+- `127.0.0.1:2222` → Orin `:22` — `ssh -J youruser@example.com youruser@127.0.0.1 -p 2222` from a laptop while travelling.
 
 Auth model: there is no FastAPI-level auth. Caddy + oauth2-proxy gates the public path; LAN is trusted by network position. Removing the previous HTTP Basic layer eliminated the duplicate password popup once OAuth landed.
 
@@ -77,7 +77,7 @@ A user's Google email has to be allow-listed in three places — there's no cent
 
 1. **EC2** — `/etc/oauth2-proxy/emails`, one email per line. Gates the web frontdoor; oauth2-proxy reads it live, no restart needed.
 2. **Orin** — `/etc/belfry/allowed-emails`, one email per line. Gates the mobile app's `/auth/exchange` JWT-mint endpoint. Read once at FastAPI startup, so `sudo systemctl restart belfry` after editing.
-3. **Google Cloud Console** — the OAuth consent screen's "Test users" list (project name `yellowchicken.io`, since the app is in Testing mode and not verified). Without this Google blocks the sign-in flow itself, before the email ever reaches our allow-lists.
+3. **Google Cloud Console** — the OAuth consent screen's "Test users" list (project name `example.com`, since the app is in Testing mode and not verified). Without this Google blocks the sign-in flow itself, before the email ever reaches our allow-lists.
 
 ## Cameras and sets
 
@@ -139,7 +139,7 @@ Same canvas, same `BoxOverlay`, but driven by re-running the detector on the pla
 
 ## Training data & labeler
 
-The fine-tune dataset lives outside the repo at `/home/paulm/belfry-training/` (configurable via `dvr/training.py:TRAINING_ROOT`). Two-stage layout:
+The fine-tune dataset lives outside the repo at `/home/youruser/belfry-training/` (configurable via `dvr/training.py:TRAINING_ROOT`). Two-stage layout:
 
 ```
 belfry-training/
@@ -233,7 +233,7 @@ Shipped:
 - **Phase 1** — 24/7 recording, disk-watermark retention, scrubback UI.
 - **Remote access (slice of phases 2 + 3)** — Caddy + oauth2-proxy on EC2 with Google OAuth allow-listing, autossh reverse tunnel from the Orin so all video and recordings still live on-prem.
 - **Phase 4 (all 5 slices)** — MegaDetector + YOLO11n ensemble at 1 fps per camera, event coalescing into SQLite, retention sweep, `/api/events*` + `/events` browse page, timeline pips + prev/next event nav on the playback page, live bounding-box overlay via SSE with a "Show labels" header toggle. See `~/.claude/plans/object-detection.md`.
-- **Training data pipeline** — staging→promoted layout under `/home/paulm/belfry-training/`, `dataset.yaml`-driven class map, pre-seed-from-events.db on capture, ffmpeg-driven one-click event staging from `/events`, in-browser bbox labeler at `/training` with promoted-image review. See the "Training data & labeler" section above.
+- **Training data pipeline** — staging→promoted layout under `/home/youruser/belfry-training/`, `dataset.yaml`-driven class map, pre-seed-from-events.db on capture, ffmpeg-driven one-click event staging from `/events`, in-browser bbox labeler at `/training` with promoted-image review. See the "Training data & labeler" section above.
 
 Remaining (see `~/.claude/plans/we-have-this-dvr-resilient-lighthouse.md` for the rest):
 
@@ -251,7 +251,7 @@ Inference follow-ups:
 - systemd on the Orin: `belfry.service`, `belfry-tunnel.service`, `belfry-inference.service`, and `nginx.service` are all `enabled` at boot. `belfry` / `belfry-tunnel` / `belfry-inference` all `Restart=on-failure` (tunnel is `Restart=always`) so crashes and drops recover automatically. Logs: `journalctl -u belfry`, `journalctl -u belfry-tunnel`, `journalctl -u belfry-inference`.
 - systemd on EC2: `caddy.service` and `oauth2-proxy.service`. Logs: `journalctl -u caddy` / `journalctl -u oauth2-proxy`.
 - Orin: NVIDIA Jetson Orin (aarch64), Ubuntu 22.04. NVIDIA GPU/NPU available but unused until Phase 4.
-- EC2: Amazon Linux 2023 x86_64, us-west-2, paulm user, EIP attached to `yellowchicken.io`.
+- EC2: Amazon Linux 2023 x86_64, us-west-2, youruser user, EIP attached to `example.com`.
 - Disk on Orin: 3.6 TB NVMe at `/dev/nvme0n1p1` mounted at `/`. At ~240 GB/day for 8 main-stream H.264 1080p cameras, retention defaults give ~12 days before eviction kicks in.
 
 ## Browser self-test

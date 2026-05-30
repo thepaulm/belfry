@@ -290,7 +290,7 @@ datasets/belfry-2026-05/
   `.txt` sidecars our exporter writes; writes them back with the new class
   labels.
 - Can run on the existing EC2 frontdoor box behind the same Caddy +
-  oauth2-proxy gate, so the UI is at e.g. `label.yellowchicken.io` with the
+  oauth2-proxy gate, so the UI is at e.g. `label.example.com` with the
   same Google login. Footage stays accessible to you, nobody else.
 - Storage backend: local filesystem. Point Label Studio at a directory synced
   from the Orin via `rsync` (one-off, not a live mount). Manageable at 30 GB.
