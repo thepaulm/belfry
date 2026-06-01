@@ -616,24 +616,93 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
   @override
   Widget build(BuildContext context) {
     final dayStartUnix = _selectedDay.millisecondsSinceEpoch / 1000.0;
+    // Landscape = "cinema" mode: hide the app bar and day strip, fold the
+    // remaining controls (back / time / scale / labels / live) into one
+    // compact row, and shrink the timeline so the video gets nearly the
+    // whole screen. Day selection is still reachable by rotating back.
+    final landscape =
+        MediaQuery.of(context).orientation == Orientation.landscape;
+
+    final timeline = _Timeline(
+      sliderSec: _sliderSec,
+      minSec: _scrubMinSec(),
+      maxSec: _scrubMaxSec(),
+      segments: _segmentsForSelectedDay(),
+      events: _dayEvents,
+      dayStartUnix: dayStartUnix,
+      timeLabel: _formatHms(_sliderSec),
+      isLive: _isLive,
+      compact: landscape,
+      // In landscape the time label lives in the combined control row.
+      showLabel: !landscape,
+      onPipTap: (ts) {
+        final sec = ts.difference(_selectedDay).inMilliseconds / 1000.0;
+        if (sec < 0 || sec > 86399) return;
+        setState(() {
+          _sliderSec = sec;
+          _ensureVisible(sec);
+        });
+        _loadWindowAt(sec);
+      },
+      onChangeStart: (_) => _userScrubbing = true,
+      onChanged: (v) => setState(() => _sliderSec = v),
+      onChangeEnd: (v) {
+        _userScrubbing = false;
+        _loadWindowAt(v);
+      },
+    );
+
+    final List<Widget> children;
+    if (landscape) {
+      children = [
+        _landscapeControlBar(),
+        timeline,
+        Expanded(child: _videoArea()),
+      ];
+    } else {
+      children = [
+        const SizedBox(height: 8),
+        _DayStrip(
+          today: _today,
+          selectedDay: _selectedDay,
+          hasFootage: _dayHasFootage,
+          onSelect: _selectDay,
+        ),
+        const SizedBox(height: 4),
+        _ScaleBar(
+          scale: _viewScale,
+          onScale: _setScale,
+          sliceLabel: _sliceLabel(),
+          canPrev: _canShift(-1),
+          canNext: _canShift(1),
+          onShift: _shiftSlice,
+        ),
+        const SizedBox(height: 4),
+        timeline,
+        Expanded(child: _videoArea()),
+      ];
+    }
+
     return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.cameraLabel),
-        actions: [
-          IconButton(
-            icon: Icon(_labelsOn
-                ? Icons.visibility
-                : Icons.visibility_off_outlined),
-            tooltip: _labelsOn ? 'Hide labels' : 'Show labels',
-            onPressed: () => _setLabelsOn(!_labelsOn),
-          ),
-          IconButton(
-            icon: const Icon(Icons.sensors),
-            tooltip: 'Go Live',
-            onPressed: _isLive ? null : () => _enterLive(),
-          ),
-        ],
-      ),
+      appBar: landscape
+          ? null
+          : AppBar(
+              title: Text(widget.cameraLabel),
+              actions: [
+                IconButton(
+                  icon: Icon(_labelsOn
+                      ? Icons.visibility
+                      : Icons.visibility_off_outlined),
+                  tooltip: _labelsOn ? 'Hide labels' : 'Show labels',
+                  onPressed: () => _setLabelsOn(!_labelsOn),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.sensors),
+                  tooltip: 'Go Live',
+                  onPressed: _isLive ? null : () => _enterLive(),
+                ),
+              ],
+            ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _loadError != null
@@ -643,55 +712,90 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
                     child: Text('failed to load: $_loadError'),
                   ),
                 )
-              : Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    const SizedBox(height: 8),
-                    _DayStrip(
-                      today: _today,
-                      selectedDay: _selectedDay,
-                      hasFootage: _dayHasFootage,
-                      onSelect: _selectDay,
-                    ),
-                    const SizedBox(height: 4),
-                    _ScaleBar(
-                      scale: _viewScale,
-                      onScale: _setScale,
-                      sliceLabel: _sliceLabel(),
-                      canPrev: _canShift(-1),
-                      canNext: _canShift(1),
-                      onShift: _shiftSlice,
-                    ),
-                    const SizedBox(height: 4),
-                    _Timeline(
-                      sliderSec: _sliderSec,
-                      minSec: _scrubMinSec(),
-                      maxSec: _scrubMaxSec(),
-                      segments: _segmentsForSelectedDay(),
-                      events: _dayEvents,
-                      dayStartUnix: dayStartUnix,
-                      timeLabel: _formatHms(_sliderSec),
-                      isLive: _isLive,
-                      onPipTap: (ts) {
-                        final sec = ts.difference(_selectedDay).inMilliseconds /
-                            1000.0;
-                        if (sec < 0 || sec > 86399) return;
-                        setState(() {
-                          _sliderSec = sec;
-                          _ensureVisible(sec);
-                        });
-                        _loadWindowAt(sec);
-                      },
-                      onChangeStart: (_) => _userScrubbing = true,
-                      onChanged: (v) => setState(() => _sliderSec = v),
-                      onChangeEnd: (v) {
-                        _userScrubbing = false;
-                        _loadWindowAt(v);
-                      },
-                    ),
-                    Expanded(child: _videoArea()),
-                  ],
+              : SafeArea(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: children,
+                  ),
                 ),
+    );
+  }
+
+  // Landscape-only: every control on one short row so the video keeps the
+  // rest of the height. Back / LIVE+time on the left, scale stepper in the
+  // middle, labels + Go-Live on the right.
+  Widget _landscapeControlBar() {
+    Widget iconBtn(IconData icon, String tip, VoidCallback? onTap) =>
+        IconButton(
+          icon: Icon(icon, size: 20),
+          visualDensity: VisualDensity.compact,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+          tooltip: tip,
+          onPressed: onTap,
+        );
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Row(
+        children: [
+          iconBtn(Icons.arrow_back, 'Back',
+              () => Navigator.of(context).maybePop()),
+          if (_isLive) ...[
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+              decoration: BoxDecoration(
+                color: Colors.red,
+                borderRadius: BorderRadius.circular(3),
+              ),
+              child: const Text(
+                'LIVE',
+                style: TextStyle(
+                  fontSize: 9,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 0.5,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+          ],
+          Text(
+            _formatHms(_sliderSec),
+            style: const TextStyle(
+              fontFamily: 'monospace',
+              fontSize: 13,
+              color: Colors.white70,
+            ),
+          ),
+          const Spacer(),
+          iconBtn(Icons.chevron_left, 'Previous',
+              _canShift(-1) ? () => _shiftSlice(-1) : null),
+          SegmentedButton<String>(
+            showSelectedIcon: false,
+            style: const ButtonStyle(
+              visualDensity: VisualDensity.compact,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            segments: const [
+              ButtonSegment(value: 'day', label: Text('Day')),
+              ButtonSegment(value: 'hour', label: Text('Hour')),
+              ButtonSegment(value: '5min', label: Text('5 min')),
+            ],
+            selected: {_viewScale},
+            onSelectionChanged: (s) => _setScale(s.first),
+          ),
+          iconBtn(Icons.chevron_right, 'Next',
+              _canShift(1) ? () => _shiftSlice(1) : null),
+          const Spacer(),
+          iconBtn(
+            _labelsOn ? Icons.visibility : Icons.visibility_off_outlined,
+            _labelsOn ? 'Hide labels' : 'Show labels',
+            () => _setLabelsOn(!_labelsOn),
+          ),
+          iconBtn(Icons.sensors, 'Go Live',
+              _isLive ? null : () => _enterLive()),
+        ],
+      ),
     );
   }
 
@@ -932,6 +1036,8 @@ class _Timeline extends StatelessWidget {
     required this.dayStartUnix,
     required this.timeLabel,
     required this.isLive,
+    required this.compact,
+    required this.showLabel,
     required this.onPipTap,
     required this.onChangeStart,
     required this.onChanged,
@@ -945,6 +1051,12 @@ class _Timeline extends StatelessWidget {
   final double dayStartUnix;
   final String timeLabel;
   final bool isLive;
+  // Landscape "cinema" mode: shorter track + pips so the video gets the
+  // vertical space.
+  final bool compact;
+  // When false the internal time-label row is dropped — landscape hoists it
+  // into the single combined control row instead.
+  final bool showLabel;
   final ValueChanged<DateTime> onPipTap;
   final ValueChanged<double> onChangeStart;
   final ValueChanged<double> onChanged;
@@ -956,48 +1068,58 @@ class _Timeline extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final range = (maxSec - minSec).clamp(1.0, 86400.0);
+    // Track geometry derives from one height so the bar, pips and cursor
+    // stay centered at either size.
+    final trackH = compact ? 34.0 : 52.0;
+    const barH = 8.0;
+    final pipH = compact ? 12.0 : 16.0;
+    final barTop = (trackH - barH) / 2;
+    final pipTop = (trackH - pipH) / 2;
+    final cursorInset = compact ? 4.0 : 6.0;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              if (isLive) ...[
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 6,
-                    vertical: 1,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.red,
-                    borderRadius: BorderRadius.circular(3),
-                  ),
-                  child: const Text(
-                    'LIVE',
-                    style: TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 0.5,
-                      color: Colors.white,
+        if (showLabel) ...[
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (isLive) ...[
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 1,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.red,
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                    child: const Text(
+                      'LIVE',
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 0.5,
+                        color: Colors.white,
+                      ),
                     ),
                   ),
+                  const SizedBox(width: 8),
+                ],
+                Text(
+                  timeLabel,
+                  style: const TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 14,
+                    color: Colors.white70,
+                  ),
                 ),
-                const SizedBox(width: 8),
               ],
-              Text(
-                timeLabel,
-                style: const TextStyle(
-                  fontFamily: 'monospace',
-                  fontSize: 14,
-                  color: Colors.white70,
-                ),
-              ),
-            ],
+            ),
           ),
-        ),
-        const SizedBox(height: 4),
+          SizedBox(height: compact ? 2 : 4),
+        ],
         LayoutBuilder(builder: (ctx, c) {
           final width = c.maxWidth;
           final usable = width - 2 * (_horizontalInset + _thumbRadius);
@@ -1006,7 +1128,7 @@ class _Timeline extends StatelessWidget {
               _thumbRadius +
               ((clampedSlider - minSec) / range) * usable;
           return SizedBox(
-            height: 52,
+            height: trackH,
             child: Stack(
               children: [
                 // Availability bar — slate background with lighter segments
@@ -1015,9 +1137,9 @@ class _Timeline extends StatelessWidget {
                 Positioned(
                   left: _horizontalInset + _thumbRadius,
                   right: _horizontalInset + _thumbRadius,
-                  top: 22,
+                  top: barTop,
                   child: SizedBox(
-                    height: 8,
+                    height: barH,
                     child: CustomPaint(
                       painter: _AvailabilityPainter(
                         segments: segments,
@@ -1029,12 +1151,17 @@ class _Timeline extends StatelessWidget {
                 ),
                 // Event pips — one tappable colored bar per overlapping
                 // event, drawn over the availability strip. Tap → seek.
-                ..._buildPips(usable: usable, range: range),
+                ..._buildPips(
+                  usable: usable,
+                  range: range,
+                  top: pipTop,
+                  height: pipH,
+                ),
                 // Vertical orange cursor line.
                 Positioned(
                   left: cursorX - 1,
-                  top: 6,
-                  bottom: 6,
+                  top: cursorInset,
+                  bottom: cursorInset,
                   child: Container(width: 2, color: Colors.orange),
                 ),
                 Positioned.fill(
@@ -1073,7 +1200,12 @@ class _Timeline extends StatelessWidget {
     );
   }
 
-  List<Widget> _buildPips({required double usable, required double range}) {
+  List<Widget> _buildPips({
+    required double usable,
+    required double range,
+    required double top,
+    required double height,
+  }) {
     final out = <Widget>[];
     for (final ev in events) {
       final startSec = ev.tsStart.millisecondsSinceEpoch / 1000.0 - dayStartUnix;
@@ -1090,9 +1222,9 @@ class _Timeline extends StatelessWidget {
       if (w < 3) w = 3;
       out.add(Positioned(
         left: left,
-        top: 18,
+        top: top,
         width: w,
-        height: 16,
+        height: height,
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: () => onPipTap(ev.tsStart),
