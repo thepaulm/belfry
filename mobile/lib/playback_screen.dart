@@ -135,6 +135,52 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
     });
   }
 
+  // Oldest day reachable from the day strip (14 days incl. today).
+  DateTime get _oldestDay => _today.subtract(const Duration(days: 13));
+
+  // Whether prev/next-window stepping is possible. direction: -1 earlier,
+  // +1 later. In Day scale this steps the day; in Hour/5-min it shifts the
+  // visible window by one span.
+  bool _canShift(int direction) {
+    if (_viewScale == 'day') {
+      return direction > 0
+          ? _selectedDay.isBefore(_today)
+          : _selectedDay.isAfter(_oldestDay);
+    }
+    final span = _scaleSpans[_viewScale]!;
+    final live = _liveEdgeOfSelectedDay();
+    final dayMax = live ?? 86399.0;
+    final newStart = _viewStartSec + direction * span;
+    return newStart >= 0 && newStart <= dayMax;
+  }
+
+  // Step the visible window. Mirrors web playback's shiftSlice: Day scale
+  // steps the day picker; Hour/5-min shift the window by one span and load
+  // footage at the new window start.
+  void _shiftSlice(int direction) {
+    if (!_canShift(direction)) return;
+    if (_viewScale == 'day') {
+      _selectDay(_selectedDay.add(Duration(days: direction)));
+      return;
+    }
+    final span = _scaleSpans[_viewScale]!;
+    final newStart = _viewStartSec + direction * span;
+    setState(() {
+      _viewStartSec = newStart;
+      _sliderSec = newStart;
+    });
+    _loadWindowAt(newStart);
+  }
+
+  // Label for the current visible window, e.g. "14:00 – 15:00". Empty in
+  // Day scale (the day strip already names the window).
+  String _sliceLabel() {
+    if (_viewScale == 'day') return '';
+    final span = _scaleSpans[_viewScale]!;
+    final end = (_viewStartSec + span).clamp(0.0, 86400.0);
+    return '${_formatClock(_viewStartSec)} – ${_formatClock(end)}';
+  }
+
   // Slide the visible window forward so it still contains `sec`. Called
   // on live tick / playback advancement in Hour and 5-min scales.
   void _ensureVisible(double sec) {
@@ -611,6 +657,10 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
                     _ScaleBar(
                       scale: _viewScale,
                       onScale: _setScale,
+                      sliceLabel: _sliceLabel(),
+                      canPrev: _canShift(-1),
+                      canNext: _canShift(1),
+                      onShift: _shiftSlice,
                     ),
                     const SizedBox(height: 4),
                     _Timeline(
@@ -707,6 +757,13 @@ DateTime _localStartOfDay(DateTime d) {
   return DateTime(local.year, local.month, local.day);
 }
 
+String _formatClock(double sec) {
+  final s = sec.round();
+  final h = (s ~/ 3600).toString().padLeft(2, '0');
+  final m = ((s % 3600) ~/ 60).toString().padLeft(2, '0');
+  return '$h:$m';
+}
+
 String _formatHms(double sec) {
   final s = sec.round();
   final h = (s ~/ 3600).toString().padLeft(2, '0');
@@ -798,27 +855,68 @@ class _DayStrip extends StatelessWidget {
 }
 
 class _ScaleBar extends StatelessWidget {
-  const _ScaleBar({required this.scale, required this.onScale});
+  const _ScaleBar({
+    required this.scale,
+    required this.onScale,
+    required this.sliceLabel,
+    required this.canPrev,
+    required this.canNext,
+    required this.onShift,
+  });
   final String scale;
   final ValueChanged<String> onScale;
+  final String sliceLabel;
+  final bool canPrev;
+  final bool canNext;
+  final ValueChanged<int> onShift;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24),
-      child: SegmentedButton<String>(
-        showSelectedIcon: false,
-        style: const ButtonStyle(
-          visualDensity: VisualDensity.compact,
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        ),
-        segments: const [
-          ButtonSegment(value: 'day', label: Text('Day')),
-          ButtonSegment(value: 'hour', label: Text('Hour')),
-          ButtonSegment(value: '5min', label: Text('5 min')),
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Column(
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.chevron_left),
+                visualDensity: VisualDensity.compact,
+                tooltip: 'Previous',
+                onPressed: canPrev ? () => onShift(-1) : null,
+              ),
+              SegmentedButton<String>(
+                showSelectedIcon: false,
+                style: const ButtonStyle(
+                  visualDensity: VisualDensity.compact,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                segments: const [
+                  ButtonSegment(value: 'day', label: Text('Day')),
+                  ButtonSegment(value: 'hour', label: Text('Hour')),
+                  ButtonSegment(value: '5min', label: Text('5 min')),
+                ],
+                selected: {scale},
+                onSelectionChanged: (s) => onScale(s.first),
+              ),
+              IconButton(
+                icon: const Icon(Icons.chevron_right),
+                visualDensity: VisualDensity.compact,
+                tooltip: 'Next',
+                onPressed: canNext ? () => onShift(1) : null,
+              ),
+            ],
+          ),
+          if (sliceLabel.isNotEmpty)
+            Text(
+              sliceLabel,
+              style: const TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 11,
+                color: Colors.white54,
+              ),
+            ),
         ],
-        selected: {scale},
-        onSelectionChanged: (s) => onScale(s.first),
       ),
     );
   }

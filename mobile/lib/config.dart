@@ -4,7 +4,13 @@
 // public part of a Google OAuth web client — but treating it as build
 // config keeps it out of the repo).
 class AppConfig {
-  static const String backendBase = 'https://example.com';
+  // Public frontdoor base URL. Passed via --dart-define so the real
+  // domain stays out of the repo (the committed default is a placeholder);
+  // set BELFRY_BACKEND_BASE in env.json.
+  static const String backendBase = String.fromEnvironment(
+    'BELFRY_BACKEND_BASE',
+    defaultValue: 'https://example.com',
+  );
 
   // The Web OAuth client ID is what Google embeds as the ID token `aud`,
   // and what the backend's BELFRY_GOOGLE_CLIENT_IDS allow-list checks.
