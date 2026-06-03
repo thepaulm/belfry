@@ -26,7 +26,8 @@ stream.
 - **Object detection.** An on-device YOLO model watches every camera at ~1 fps
   and records *events* — "a person was here from 3:14 to 3:15", with a
   thumbnail — into a small searchable database. Detects `person`, `dog`, `cat`,
-  `bird`, `car`, and `truck` out of the box.
+  `bird`, `car`, and `truck` out of the box, plus wildlife (`deer`, `coyote`,
+  `raccoon`, `rabbit`, `squirrel`, `rat`) once you fine-tune (see below).
 - **Event browsing.** A cross-camera event feed with filters (by class, camera,
   time window). Click any event to jump to that moment in playback. Colored pips
   on the playback timeline mark every event; `[` / `]` step between them.

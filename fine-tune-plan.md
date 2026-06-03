@@ -1,6 +1,17 @@
-# Fine-tune plan (deferred until enough data)
+# Fine-tune plan
 
-Tooling is in place; what's left is data volume + the actual training run. Not blocked on code today.
+> **Status: v1 SHIPPED 2026-06-03.** belfry-v1 is trained and live on the Orin
+> (`inference/belfry-v1.{pt,engine}`). The plan below is what was followed —
+> kept as the record and as the basis for v1.1. What actually happened:
+> Roboflow "Trailcam Detection" imported via `scripts/import-external.py`
+> (`--max-per-class 300`, hog dropped) on top of our footage → ~1,948 images;
+> `extend-head.py` 80→86; `freeze=10` train on a rented GPU (12 min, 100 epochs);
+> TRT export + swap. Verified: deer 0.95, cat 0.91, dog 0.62-0.69 (base classes
+> preserved). Known-weak: coyote (59 imgs) and squirrel (9); rat is our-footage-only.
+> **v1.1 candidate:** the true zero-drift path (§"Decision for v1" step 1 / §"Strategy"
+> step 5) — mask gradients on the first 80 head channels — was *not* done; we used
+> the simpler `freeze=10` which let base head channels drift slightly. Revisit if
+> dog/cat precision ever needs to be airtight, or to top up coyote/squirrel.
 
 See CLAUDE.md "Training data & labeler" for the staging→promoted pipeline, dataset.yaml layout, and the COCO-aligned sparse class id scheme that this plan depends on.
 
