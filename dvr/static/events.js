@@ -2,7 +2,8 @@
 // renders a thumbnail grid, supports class/camera/window filter chips,
 // and deep-links each card to /sets/<set>/<cam>/playback?ts=<ts_start>.
 
-const CLASS_CHIPS = ["all", "person", "animal", "vehicle", "motion", "dog", "cat", "bird", "car", "truck"];
+const CLASS_CHIPS = ["all", "person", "animal", "vehicle", "motion", "dog", "cat", "bird",
+  "deer", "coyote", "raccoon", "rabbit", "squirrel", "rat", "car", "truck"];
 const PAGE_SIZE = 60;
 
 const grid = document.getElementById("events-grid");
