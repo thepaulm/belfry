@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>belfry · labeler</title>
   <link rel="stylesheet" href="/static/viewer.css?v=24">
-  <script defer src="/static/training.js?v=5"></script>
+  <script defer src="/static/training.js?v=6"></script>
 </head>
 <body class="training-body">
   <header>
@@ -49,6 +49,16 @@
         <select id="new-box-class"></select>
         <p class="muted small">
           Click-drag empty space to draw a box. Click a box to select it.
+        </p>
+      </div>
+
+      <div class="tools-section">
+        <div class="rail-label">View</div>
+        <button id="hide-boxes-btn" class="tool-btn" type="button">
+          Hide boxes <span class="kbd">h</span>
+        </button>
+        <p class="muted small">
+          Hide the boxes to see what's underneath; editing is paused while hidden.
         </p>
       </div>
 

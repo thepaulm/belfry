@@ -59,6 +59,7 @@ const els = {
   prevBtn:       document.getElementById("prev-btn"),
   nextBtn:       document.getElementById("next-btn"),
   imageMeta:     document.getElementById("image-meta"),
+  hideBoxesBtn:  document.getElementById("hide-boxes-btn"),
 };
 
 const state = {
@@ -71,6 +72,7 @@ const state = {
   currentIdx: -1,        // index into filtered
   boxes: [],             // current image's boxes; normalized
   selectedBox: -1,
+  hideBoxes: false,      // view-only peek: hide boxes + pause editing
   dirty: false,
   newBoxClassId: 0,      // real class id, not an array index
   filter: { categories: new Set(), state: "all" },  // empty cats = all
@@ -370,11 +372,23 @@ function classNameOf(cls_id) {
   return state.classNameById[cls_id] || `cls${cls_id}`;
 }
 
+function setHideBoxes(hidden) {
+  state.hideBoxes = hidden;
+  if (els.hideBoxesBtn) {
+    els.hideBoxesBtn.classList.toggle("active", hidden);
+    els.hideBoxesBtn.firstChild.textContent = hidden ? "Show boxes " : "Hide boxes ";
+  }
+  if (hidden) els.canvas.style.cursor = "default";
+  drawCanvas();
+}
+
 function drawCanvas() {
   const c = els.canvas;
   const ctx = c.getContext("2d");
   ctx.clearRect(0, 0, c.width, c.height);
   if (!state.filtered.length || state.currentIdx < 0) return;
+  // Peek mode: clear canvas to reveal the image underneath, draw nothing.
+  if (state.hideBoxes) return;
 
   for (let i = 0; i < state.boxes.length; i++) {
     drawBox(ctx, state.boxes[i], i === state.selectedBox);
@@ -474,6 +488,7 @@ function handleAt(p, b) {
 function onPointerDown(e) {
   if (e.button !== 0) return;
   if (state.currentIdx < 0) return;
+  if (state.hideBoxes) return;  // peek mode is view-only
   els.canvas.setPointerCapture(e.pointerId);
   const p = canvasNormPos(e);
 
@@ -505,6 +520,7 @@ function onPointerDown(e) {
 
 function onPointerMove(e) {
   const p = canvasNormPos(e);
+  if (state.hideBoxes) { els.canvas.style.cursor = "default"; return; }
   if (!state.drag) {
     updateHoverCursor(p);
     return;
@@ -741,6 +757,7 @@ function wireTools() {
   els.trashBtn.addEventListener("click", trashCurrentBtn);
   els.prevBtn.addEventListener("click", prevImage);
   els.nextBtn.addEventListener("click", nextImage);
+  els.hideBoxesBtn.addEventListener("click", () => setHideBoxes(!state.hideBoxes));
 
   for (const btn of els.stateChips.querySelectorAll("button[data-state]")) {
     btn.addEventListener("click", () => {
@@ -772,6 +789,8 @@ function wireKeyboard() {
         e.preventDefault(); promoteCurrentBtn(); break;
       case "x":
         e.preventDefault(); trashCurrentBtn(); break;
+      case "h":
+        e.preventDefault(); setHideBoxes(!state.hideBoxes); break;
       case "Delete": case "Backspace":
         if (state.selectedBox >= 0) {
           e.preventDefault();
