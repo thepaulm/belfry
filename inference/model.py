@@ -31,10 +31,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger("belfry.inference.model")
 
 
-# Subset of COCO classes we surface as events. Everything else from
-# YOLO11 (toaster, frisbee, etc.) is dropped before the per-class
-# threshold check.
-_YOLO_KEEP = {"person", "dog", "cat", "bird", "car", "truck"}
+# Subset of classes we surface as events. Everything else the model can
+# emit (toaster, frisbee, and the rest of COCO) is dropped before the
+# per-class threshold check. The wildlife classes (deer..rat) come from
+# the belfry-v1 fine-tune; on the stock COCO model they simply never fire.
+_YOLO_KEEP = {
+    "person", "dog", "cat", "bird", "car", "truck",
+    "deer", "coyote", "raccoon", "rabbit", "squirrel", "rat",
+}
 
 
 @dataclass(frozen=True)

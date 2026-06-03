@@ -52,6 +52,13 @@ _THUMB_BOX_COLOR = {
     "dog":     (124, 209, 90),
     "cat":     (124, 209, 90),
     "bird":    (124, 209, 90),
+    # belfry-v1 wildlife fine-tune classes — all the animal green.
+    "deer":     (124, 209, 90),
+    "coyote":   (124, 209, 90),
+    "raccoon":  (124, 209, 90),
+    "rabbit":   (124, 209, 90),
+    "squirrel": (124, 209, 90),
+    "rat":      (124, 209, 90),
     "vehicle": (63, 155, 255),
     "car":     (63, 155, 255),
     "truck":   (63, 155, 255),

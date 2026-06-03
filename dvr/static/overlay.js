@@ -18,12 +18,19 @@ const CLASS_COLOR = {
   dog:     "#5ad17c",
   cat:     "#5ad17c",
   bird:    "#5ad17c",
+  // belfry-v1 wildlife fine-tune classes — all green, same animal bucket.
+  deer:     "#5ad17c",
+  coyote:   "#5ad17c",
+  raccoon:  "#5ad17c",
+  rabbit:   "#5ad17c",
+  squirrel: "#5ad17c",
+  rat:      "#5ad17c",
   vehicle: "#ff9b3f",
   car:     "#ff9b3f",
   truck:   "#ff9b3f",
-  // Motion is the catch-all "something moved here" class for objects
-  // YOLO doesn't recognise (deer, raccoon, etc.). Magenta keeps it
-  // visually distinct from the three real-class buckets.
+  // Motion is the catch-all "something moved here" class for objects the
+  // detector doesn't recognise. Magenta keeps it visually distinct from
+  // the three real-class buckets.
   motion:  "#e879f9",
 };
 const DEFAULT_COLOR = "#aaa";
