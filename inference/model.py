@@ -66,6 +66,7 @@ class Detector:
         event_classes: tuple[str, ...],
         conf_threshold: float,
         class_thresholds: dict[str, float],
+        class_aliases: dict[str, str] | None = None,
         imgsz: int = 640,
     ) -> None:
         self._yolo_pt = yolo_pt
@@ -73,6 +74,13 @@ class Detector:
         self._event_classes = set(event_classes)
         self._conf_default = conf_threshold
         self._class_thresholds = dict(class_thresholds)
+        # Output renames applied after filtering/thresholding (which all
+        # run on the raw model class names). Default car/truck → vehicle:
+        # the distinction is noise for our use, and the model flickering
+        # between the two on one pickup used to open two parallel event
+        # runs. `vehicle` is the MegaDetector-era legacy class, so every
+        # downstream palette already renders it.
+        self._class_aliases = dict(class_aliases or {})
         self._imgsz = imgsz
 
         self._yolo: Any = None
@@ -145,5 +153,7 @@ class Detector:
                 continue
             if conf < self._threshold_for(cls):
                 continue
-            out.append(Detection(cls=cls, conf=conf, bbox=bbox))
+            out.append(
+                Detection(cls=self._class_aliases.get(cls, cls), conf=conf, bbox=bbox)
+            )
         return out

@@ -950,6 +950,10 @@ async def api_training_stage_event(event_id: int) -> dict:
     ts = row["ts_start"]
     thumb_rel = row["thumb_path"]
 
+    # Merged detector aliases (vehicle) stage under their training class
+    # (car) — see training.STAGE_CLASS_FALLBACK.
+    cls = training.STAGE_CLASS_FALLBACK.get(cls, cls)
+
     training.ensure_dataset_yaml()
     class_map, _ = training.load_class_map()
     if cls not in class_map:

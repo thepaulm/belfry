@@ -58,6 +58,7 @@ def main() -> int:
         event_classes=inf.event_classes,
         conf_threshold=inf.conf_threshold,
         class_thresholds=inf.class_thresholds,
+        class_aliases=inf.class_aliases,
     )
     inf.thumbs_dir.mkdir(parents=True, exist_ok=True)
 

@@ -2,8 +2,10 @@
 // renders a thumbnail grid, supports class/camera/window filter chips,
 // and deep-links each card to /sets/<set>/<cam>/playback?ts=<ts_start>.
 
+// car/truck merge into "vehicle" at detection time (inference/model.py
+// class_aliases), so they don't get their own chips.
 const CLASS_CHIPS = ["all", "person", "animal", "vehicle", "motion", "dog", "cat", "bird",
-  "deer", "coyote", "raccoon", "rabbit", "squirrel", "rat", "car", "truck"];
+  "deer", "coyote", "raccoon", "rabbit", "squirrel", "rat"];
 const PAGE_SIZE = 60;
 
 const grid = document.getElementById("events-grid");

@@ -103,6 +103,7 @@ def main() -> int:
         event_classes=inf.event_classes,
         conf_threshold=inf.conf_threshold,
         class_thresholds=inf.class_thresholds,
+        class_aliases=inf.class_aliases,
     )
     # Make the detector reachable to /playback inside the FastAPI app.
     # db_path rides along so the playback handler can surface stored

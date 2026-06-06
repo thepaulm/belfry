@@ -69,6 +69,11 @@ class Inference:
     # class key is present.
     conf_threshold: float
     class_thresholds: dict[str, float]
+    # Output renames applied by the detector after filtering/thresholding
+    # (event_classes and class_thresholds key on the raw model names).
+    # Defaults to car/truck → vehicle; set `class_aliases: {}` in
+    # cameras.yaml to keep the raw classes.
+    class_aliases: dict[str, str]
     # Coalescing window: same (camera, class) detections within this many
     # seconds extend a single event row instead of opening a new one.
     cooldown_s: int
@@ -140,6 +145,11 @@ def _load_inference(raw: dict, project_root: Path, recording: Recording) -> Infe
         )
     )
     motion = block.get("motion") or {}
+    # `None` (key absent) gets the default; an explicit empty mapping in
+    # cameras.yaml means "no aliasing", so don't `or` it away.
+    aliases = block.get("class_aliases")
+    if aliases is None:
+        aliases = {"car": "vehicle", "truck": "vehicle"}
     return Inference(
         yolo_pt=_resolve(
             block.get("yolo_pt", "inference/yolo11l.pt"), project_root
@@ -150,6 +160,7 @@ def _load_inference(raw: dict, project_root: Path, recording: Recording) -> Infe
         event_classes=classes,
         conf_threshold=float(block.get("conf_threshold", 0.40)),
         class_thresholds={k: float(v) for k, v in (block.get("class_thresholds") or {}).items()},
+        class_aliases={str(k): str(v) for k, v in aliases.items()},
         cooldown_s=int(block.get("cooldown_s", 10)),
         record_fps=int(block.get("record_fps", 1)),
         live_fps=int(block.get("live_fps", 5)),

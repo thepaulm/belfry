@@ -465,6 +465,7 @@ def main() -> int:
             event_classes=inf.event_classes,
             conf_threshold=inf.conf_threshold,
             class_thresholds=inf.class_thresholds,
+            class_aliases=inf.class_aliases,
         )
 
     overall = {"frames": 0, "with_dets": 0, "events_written": 0, "elapsed_s": 0.0}

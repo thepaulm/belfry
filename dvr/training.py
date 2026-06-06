@@ -141,6 +141,15 @@ def load_class_map() -> tuple[dict[str, int], list[tuple[int, str]]]:
     return name_to_id, id_to_name
 
 
+# Detector-emitted aggregate classes that aren't training classes
+# themselves, mapped to the training class we stage/pre-seed them as.
+# "vehicle" is what car/truck merge into at detection time (see
+# class_aliases in inference/model.py); training labels stay COCO-aligned,
+# so seed those boxes as "car" and let the labeler review correct any
+# the human cares to. Keeps 📥 stage-event working for merged classes.
+STAGE_CLASS_FALLBACK = {"vehicle": "car"}
+
+
 def bbox_to_yolo_line(bbox: list[float], cls_id: int) -> str:
     """Convert events.db's [x1,y1,x2,y2] in 0..1 to a YOLO label line.
 
@@ -183,6 +192,10 @@ def seed_labels_for_capture(
     lines: list[str] = []
     for cls, peak_bbox_json in rows:
         cls_id = class_map.get(cls)
+        if cls_id is None:
+            # Aggregate alias (vehicle → car); 0 is a real id (person),
+            # so the lookups stay explicit `is None` checks.
+            cls_id = class_map.get(STAGE_CLASS_FALLBACK.get(cls, ""))
         if cls_id is None:
             continue  # legacy aggregate or motion class — no fine-tune target
         try:
