@@ -1,0 +1,5 @@
+# Single place to bump per training run — sourced by the runpod-*.sh
+# scripts so all four stay in agreement on tar/run/weight names.
+# e.g. v1.1 -> tar belfry-v1.1.tar, run name belfry-v1.1,
+#              weights inference/belfry-v1.1.{pt,engine}
+VERSION=v1.1
