@@ -47,6 +47,13 @@ class AuthService extends ChangeNotifier {
   bool _initialized = false;
   bool get initialized => _initialized;
 
+  // Hooks run at the start of signOut(), while the JWT is still valid —
+  // PushService registers one here to deregister its FCM token before we
+  // drop the session (the DELETE /api/devices call needs the bearer).
+  final List<Future<void> Function()> _signOutHooks = [];
+  void addSignOutHook(Future<void> Function() hook) =>
+      _signOutHooks.add(hook);
+
   // First-launch sequence: configure google_sign_in, then try to rehydrate
   // a stored JWT. If the stored JWT is past (now + slack), drop it — the
   // user will re-sign-in. We don't try to silently re-authenticate Google
@@ -135,8 +142,15 @@ class AuthService extends ChangeNotifier {
   }
 
   Future<void> signOut() async {
-    // Clear our session first — even if the Google side errors, the user
-    // is signed out of belfry the moment we drop the JWT.
+    // Run sign-out hooks first, while the bearer is still good (token
+    // deregistration). Best-effort — a failed hook can't block sign-out.
+    for (final hook in _signOutHooks) {
+      try {
+        await hook();
+      } catch (_) {}
+    }
+    // Clear our session — even if the Google side errors, the user is
+    // signed out of belfry the moment we drop the JWT.
     await _storage.delete(key: _storageKey);
     _session = null;
     notifyListeners();

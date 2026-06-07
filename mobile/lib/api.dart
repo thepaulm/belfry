@@ -89,6 +89,50 @@ class Event {
   );
 }
 
+// An ROI alert as served by GET /api/alerts. Mirrors the event shape but
+// keyed on the ROI/rule that fired. `thumbUrl` already carries the full
+// "/api/alerts/thumb/{id}" path (or null) — pair it with bearerHeaders().
+class Alert {
+  Alert({
+    required this.id,
+    required this.camera,
+    required this.setId,
+    required this.roiId,
+    required this.roiName,
+    required this.cls,
+    required this.ts,
+    required this.conf,
+    required this.hasThumb,
+  });
+
+  final int id;
+  final String camera;
+  final String? setId;
+  final int roiId;
+  final String roiName;
+  final String cls;
+  final DateTime ts;
+  final double conf;
+  final bool hasThumb;
+
+  String? thumbUrl() =>
+      hasThumb ? '${AppConfig.backendBase}/api/alerts/thumb/$id' : null;
+
+  factory Alert.fromJson(Map<String, dynamic> j) => Alert(
+    id: j['id'] as int,
+    camera: j['camera'] as String,
+    setId: j['set_id'] as String?,
+    roiId: j['roi_id'] as int,
+    roiName: j['roi_name'] as String,
+    cls: j['class'] as String,
+    ts: DateTime.fromMillisecondsSinceEpoch(
+      ((j['ts'] as num).toDouble() * 1000).round(),
+    ),
+    conf: (j['conf'] as num).toDouble(),
+    hasThumb: j['thumb_url'] != null,
+  );
+}
+
 class PlaybackRange {
   PlaybackRange({required this.start, required this.duration});
 
@@ -166,6 +210,53 @@ class ApiClient {
     }
     final body = jsonDecode(resp.body);
     return (body as List).map((e) => Event.fromJson(e)).toList();
+  }
+
+  Future<List<Alert>> getAlerts({
+    String? cam,
+    DateTime? since,
+    int? beforeId,
+    int limit = 100,
+  }) async {
+    final p = <String, String>{'limit': '$limit'};
+    if (cam != null) p['cam'] = cam;
+    if (since != null) {
+      p['since'] = (since.millisecondsSinceEpoch / 1000).toString();
+    }
+    if (beforeId != null) p['before_id'] = '$beforeId';
+    final uri = Uri.parse(
+      '${AppConfig.backendBase}/api/alerts',
+    ).replace(queryParameters: p);
+    final resp = await http.get(uri, headers: bearerHeaders());
+    if (resp.statusCode != 200) {
+      throw ApiException(resp.statusCode, resp.body);
+    }
+    final body = jsonDecode(resp.body);
+    return (body as List).map((e) => Alert.fromJson(e)).toList();
+  }
+
+  // Register/deregister this device's FCM token for push. The backend
+  // takes the owner email from the verified JWT, so we only send the
+  // token + platform. Best-effort: callers swallow failures.
+  Future<void> registerDevice(String token, String platform) async {
+    final resp = await http.post(
+      Uri.parse('${AppConfig.backendBase}/api/devices'),
+      headers: {...bearerHeaders(), 'Content-Type': 'application/json'},
+      body: jsonEncode({'token': token, 'platform': platform}),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException(resp.statusCode, resp.body);
+    }
+  }
+
+  Future<void> unregisterDevice(String token) async {
+    final resp = await http.delete(
+      Uri.parse('${AppConfig.backendBase}/api/devices/$token'),
+      headers: bearerHeaders(),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException(resp.statusCode, resp.body);
+    }
   }
 
   // The video_player package handles the mp4 fetch itself — we just hand it

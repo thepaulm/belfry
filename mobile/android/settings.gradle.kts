@@ -20,6 +20,9 @@ plugins {
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
     id("com.android.application") version "8.7.3" apply false
     id("org.jetbrains.kotlin.android") version "2.1.0" apply false
+    // Reads google-services.json and generates the default Firebase
+    // options resource so Firebase.initializeApp() works with no args.
+    id("com.google.gms.google-services") version "4.4.2" apply false
 }
 
 include(":app")

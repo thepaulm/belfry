@@ -899,7 +899,10 @@ class _DayStrip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      height: 64,
+      // 72, not 64: each cell's Column (Mon / 18 / ●, two 2px gaps) plus the
+      // Container's 4px vertical margin needs ~70px at default text scale;
+      // 64 left only 56px of inner space and overflowed ~6px on the bottom.
+      height: 72,
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
         reverse: true,

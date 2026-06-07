@@ -47,3 +47,9 @@ app.*.map.json
 # Per-developer build config (Google OAuth Web client ID, future
 # dart-define values). See env.example.json for schema.
 env.json
+
+# Firebase config — ties the build to a specific Firebase project. Drop
+# your own per Track A in runme.sh. (Shipped in the APK, not a secret,
+# but kept out of the repo like the other deployment specifics.)
+/android/app/google-services.json
+/ios/Runner/GoogleService-Info.plist

@@ -38,6 +38,14 @@ dependencies:
   http: ^1.6.0
   flutter_secure_storage: ^10.2.0
   video_player: ^2.10.1
+  # ROI alert push. firebase_core/messaging deliver the FCM message;
+  # flutter_local_notifications posts the heads-up banner + sound when a
+  # message arrives in the foreground (FCM only shows a tray notification
+  # on its own while the app is backgrounded) and owns the high-importance
+  # channel that backgrounded notifications route through.
+  firebase_core: ^3.8.0
+  firebase_messaging: ^15.1.5
+  flutter_local_notifications: ^18.0.1
 
 dev_dependencies:
   flutter_test:

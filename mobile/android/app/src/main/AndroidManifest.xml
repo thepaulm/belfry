@@ -1,5 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Android 13+ requires runtime consent before any notification posts;
+         FirebaseMessaging.requestPermission() prompts for it. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:label="belfry"
         android:name="${applicationName}"
@@ -26,6 +29,14 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- Route backgrounded FCM `notification` messages through our
+             high-importance channel (created in push_service.dart) so they
+             get a heads-up banner + sound. Without this they fall to a
+             low-importance fallback channel and stay silent. The id must
+             match PushService._channel.id. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="roi_alerts" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
