@@ -4,9 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>belfry</title>
-  <link rel="stylesheet" href="/static/viewer.css?v=18">
+  <link rel="stylesheet" href="/static/viewer.css?v=27">
   <script defer src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
   <script defer src="/static/overlay.js?v=5"></script>
+  <script defer src="/static/alerts.js?v=2"></script>
   <script defer src="/static/viewer.js?v=14"></script>
 </head>
 <body>
@@ -16,6 +17,7 @@
     <a class="nav-link" href="/events">Events</a>
     <a class="nav-link" href="/rois">Regions</a>
     <button id="labels-toggle" class="labels-toggle" type="button" aria-pressed="false">Show labels</button>
+    <button id="alerts-toggle" class="labels-toggle" type="button" aria-pressed="false" title="Browser notifications for ROI alerts">🔔 Alerts</button>
     <span id="status" class="status-pill"></span>
   </header>
   <main id="grid"></main>

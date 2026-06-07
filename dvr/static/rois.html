@@ -4,8 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>belfry · regions &amp; alerts</title>
-  <link rel="stylesheet" href="/static/viewer.css?v=26">
+  <link rel="stylesheet" href="/static/viewer.css?v=27">
   <script defer src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+  <script defer src="/static/alerts.js?v=2"></script>
   <script defer src="/static/rois.js?v=1"></script>
 </head>
 <body class="rois-body">
@@ -19,6 +20,7 @@
       Camera
       <select id="cam-select"></select>
     </label>
+    <button id="alerts-toggle" class="labels-toggle" type="button" aria-pressed="false" title="Browser notifications for ROI alerts">🔔 Alerts</button>
     <span id="status" class="status-pill"></span>
   </header>
 

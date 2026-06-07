@@ -1341,3 +1341,39 @@ main#events-grid {
 @media (max-width: 760px) {
   .rois-main { grid-template-columns: 1fr; }
 }
+
+/* ---------- alert toasts (alerts.js) ---------- */
+
+#alert-toasts {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 320px;
+}
+.alert-toast {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  background: #1a1e24;
+  border: 1px solid #2a2f37;
+  border-left: 3px solid var(--accent);
+  border-radius: 5px;
+  padding: 8px 10px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  transition: opacity 0.4s, transform 0.4s;
+}
+.alert-toast.leaving { opacity: 0; transform: translateX(20px); }
+.alert-toast-img {
+  width: 56px;
+  height: 42px;
+  object-fit: cover;
+  border-radius: 3px;
+  flex: 0 0 auto;
+}
+.alert-toast-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.alert-toast-text strong { font-size: 0.9rem; }
+.alert-toast-text span { font-size: 0.78rem; color: var(--muted); }
