@@ -235,9 +235,10 @@ belfry-v1 is trained and live — see [fine-tune-plan.md](fine-tune-plan.md) for
 Shipped:
 
 - **Phase 1** — 24/7 recording, disk-watermark retention, scrubback UI.
-- **Remote access (slice of phases 2 + 3)** — Caddy + oauth2-proxy on EC2 with Google OAuth allow-listing, autossh reverse tunnel from the Orin so all video and recordings still live on-prem.
-- **Phase 4 (all 5 slices)** — MegaDetector + YOLO11n ensemble at 1 fps per camera, event coalescing into SQLite, retention sweep, `/api/events*` + `/events` browse page, timeline pips + prev/next event nav on the playback page, live bounding-box overlay via SSE with a "Show labels" header toggle. See `~/.claude/plans/object-detection.md`.
-- **Training data pipeline** — staging→promoted layout under `/home/youruser/belfry-training/`, `dataset.yaml`-driven class map, pre-seed-from-events.db on capture, ffmpeg-driven one-click event staging from `/events`, in-browser bbox labeler at `/training` with promoted-image review. See the "Training data & labeler" section above.
+- **Remote access (slice of phases 2 + 3)** — Caddy + oauth2-proxy on EC2 with Google OAuth allow-listing, autossh reverse tunnel from the Orin so all video + recordings still live on-prem.
+- **Phase 4 (all 5 slices)** — 1 fps per-camera detection, event coalescing into SQLite, retention sweep, `/api/events*` + `/events` browse page, timeline pips + prev/next event nav on playback, live bounding-box overlay via SSE with a "Show labels" toggle. See `~/.claude/plans/object-detection.md`.
+- **Training data pipeline** — staging→promoted layout under `/home/youruser/belfry-training/`, `dataset.yaml`-driven class map, pre-seed-from-events.db on capture, ffmpeg one-click event staging from `/events`, in-browser bbox labeler at `/training`. See the "Training data & labeler" section above.
+- **ROI alerts** — per-camera regions + class-in-region rules → alerts (`/api/alerts`) + gated FCM mobile push; editor at `/rois`. See [roi-alerts.md](roi-alerts.md).
 
 Remaining (see `~/.claude/plans/we-have-this-dvr-resilient-lighthouse.md` for the rest):
 
@@ -246,9 +247,9 @@ Remaining (see `~/.claude/plans/we-have-this-dvr-resilient-lighthouse.md` for th
 
 Inference follow-ups:
 
-- **Backfill CLI** — `inference/backfill.py` for one cam + a time range (e.g. `python -m inference.backfill --cam cam12 --since 90m --replace`); reuses the production `Detector` and the recorder's coalescing rules but drives off mp4 segments instead of RTSP. Useful after detector changes or to fill gaps. Open: an `--all-cams` mode + a `processed_until_mtime` watermark for incremental runs.
-- **Per-class threshold tuning** — after a week of real footage, drop a calibrated `class_thresholds:` block into `cameras.yaml` (likely `person: 0.55` to silence wall/edge false positives at night, `bird: 0.30` to catch partial-frame).
-- **Wildlife fine-tune (Phase B)** — ✅ shipped as belfry-v1 (2026-06-03): deer/coyote/raccoon/rabbit/squirrel/rat added via 80→86 head extension, trained `freeze=10` on our footage + Roboflow trailcam data, live on the Orin. See the Inference "Model" note above and [fine-tune-plan.md](fine-tune-plan.md). Open: coyote (59 imgs) / squirrel (9) under-fed; a v1.1 with true zero-drift head freeze (mask gradients on the first 80 channels) would also harden base classes (dog/cat) if pet detection ever needs to be airtight.
+- **Backfill CLI** — `inference/backfill.py` for one cam + a time range (e.g. `python -m inference.backfill --cam cam12 --since 90m --replace`); reuses the production `Detector` + coalescing rules but drives off mp4 segments instead of RTSP. Useful after detector changes or to fill gaps. Open: an `--all-cams` mode + a `processed_until_mtime` watermark for incremental runs.
+- **Per-class threshold tuning** — after a week of real footage, drop a calibrated `class_thresholds:` block into `cameras.yaml` (likely `person: 0.55` to silence night wall/edge false positives, `bird: 0.30` for partial-frame).
+- **Wildlife fine-tune (Phase B)** — ✅ shipped as belfry-v1 (2026-06-03): deer/coyote/raccoon/rabbit/squirrel/rat added via 80→86 head extension, trained `freeze=10` on our footage + Roboflow trailcam data, live on the Orin. See the Inference "Model" note above and [fine-tune-plan.md](fine-tune-plan.md). Open: coyote (59 imgs) / squirrel (9) under-fed; a v1.1 with true zero-drift head freeze (mask gradients on the first 80 channels) would also harden base classes if pet detection ever needs to be airtight.
 
 ## Operational
 

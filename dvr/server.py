@@ -17,7 +17,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 
-from . import auth, training
+from . import auth, training, zones
 from .config import Camera, CameraSet, load_config
 from .health import probe_all
 from .retention import RetentionLoop
@@ -374,6 +374,265 @@ async def api_events_neighbors(cam: str, ts: float) -> dict:
         "prev": {"id": prev["id"], "ts_start": prev["ts_start"]} if prev else None,
         "next": {"id": nxt["id"], "ts_start": nxt["ts_start"]} if nxt else None,
     }
+
+
+# --- alerts (read side) ------------------------------------------------
+# One row per ROI-rule firing, written by the inference recorder into
+# events.db. Mirrors the /api/events read surface; the mobile app polls
+# this for history (and FCM push delivers the live nudge — Phase 3).
+
+
+def _alert_row_to_dict(r: sqlite3.Row) -> dict:
+    try:
+        bbox = json.loads(r["peak_bbox"])
+    except (json.JSONDecodeError, TypeError):
+        bbox = None
+    return {
+        "id": r["id"],
+        "rule_id": r["rule_id"],
+        "camera": r["camera"],
+        "set_id": _CAMERA_TO_SET.get(r["camera"]),
+        "roi_id": r["roi_id"],
+        "roi_name": r["roi_name"],
+        "class": r["class"],
+        "ts": r["ts"],
+        "conf": round(r["conf"], 3),
+        "peak_bbox": bbox,
+        "thumb_url": f"/api/alerts/thumb/{r['id']}" if r["thumb_path"] else None,
+    }
+
+
+@app.get("/api/alerts")
+async def api_alerts(
+    cam: str | None = None,
+    since: float | None = None,
+    before_id: int | None = Query(default=None, description="Cursor: alerts with id < before_id"),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[dict]:
+    """Filtered alerts list, newest first. Cursor-paginate via before_id."""
+    conn = _open_events_db()
+    if conn is None:
+        return []
+    where, args = [], []
+    if cam is not None:
+        where.append("camera = ?")
+        args.append(cam)
+    if since is not None:
+        where.append("ts >= ?")
+        args.append(since)
+    if before_id is not None:
+        where.append("id < ?")
+        args.append(before_id)
+    sql = "SELECT * FROM alerts"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(limit)
+    try:
+        rows = conn.execute(sql, args).fetchall()
+    except sqlite3.OperationalError:
+        return []  # alerts table not created yet (inference never ran new schema)
+    finally:
+        conn.close()
+    return [_alert_row_to_dict(r) for r in rows]
+
+
+@app.get("/api/alerts/thumb/{alert_id}")
+async def api_alerts_thumb(alert_id: int) -> FileResponse:
+    """Serve the fire-time JPEG (bbox + ROI outline baked in)."""
+    conn = _open_events_db()
+    if conn is None:
+        raise HTTPException(status_code=404, detail="events DB not present")
+    try:
+        row = conn.execute(
+            "SELECT thumb_path FROM alerts WHERE id = ?", (alert_id,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        raise HTTPException(status_code=404, detail="alerts table not present")
+    finally:
+        conn.close()
+    if row is None or not row["thumb_path"]:
+        raise HTTPException(status_code=404, detail=f"no thumbnail for alert {alert_id}")
+    abs_path = (config.inference.thumbs_dir / row["thumb_path"]).resolve()
+    if config.inference.thumbs_dir.resolve() not in abs_path.parents:
+        raise HTTPException(status_code=404)
+    if not abs_path.is_file():
+        raise HTTPException(status_code=404, detail="thumbnail file gone")
+    return FileResponse(
+        abs_path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
+# --- ROIs + alert rules ------------------------------------------------
+# Per-camera polygonal regions of interest and the alert rules that fire
+# when a class is detected inside one. Stored in config.db (durable,
+# separate from events.db); CRUD lives in dvr/zones.py. The inference
+# recorder reads the same tables to evaluate membership and emit alerts.
+
+_CONFIG_DB = config.inference.config_db_path
+_KNOWN_CAMS = {c.name for c in config.all_cameras}
+
+
+def _require_camera(cam: str) -> None:
+    if cam not in _KNOWN_CAMS:
+        raise HTTPException(status_code=404, detail=f"unknown camera: {cam}")
+
+
+def _emitted_classes() -> list[str]:
+    """The class names the recorder actually emits — event_classes with
+    class_aliases applied (e.g. car/truck → vehicle), de-duped in order.
+    These are what an alert rule's `class` must match."""
+    aliases = config.inference.class_aliases
+    out: list[str] = []
+    for c in config.inference.event_classes:
+        e = aliases.get(c, c)
+        if e not in out:
+            out.append(e)
+    return out
+
+
+@app.get("/api/alert-classes")
+async def api_alert_classes() -> list[str]:
+    return _emitted_classes()
+
+
+@app.get("/api/rois")
+async def api_rois_list(cam: str | None = None) -> list[dict]:
+    if cam is not None:
+        _require_camera(cam)
+    return zones.list_rois(_CONFIG_DB, camera=cam)
+
+
+@app.post("/api/rois")
+async def api_rois_create(body: dict) -> dict:
+    cam = str(body.get("camera", ""))
+    _require_camera(cam)
+    name = str(body.get("name", "")).strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    try:
+        polygon = zones.validate_polygon(body.get("polygon"))
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=f"bad polygon: {e}")
+    enabled = bool(body.get("enabled", True))
+    return zones.create_roi(_CONFIG_DB, cam, name, polygon, enabled)
+
+
+@app.put("/api/rois/{roi_id}")
+async def api_rois_update(roi_id: int, body: dict) -> dict:
+    fields: dict = {}
+    if "name" in body:
+        name = str(body["name"]).strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name cannot be empty")
+        fields["name"] = name
+    if "polygon" in body:
+        try:
+            fields["polygon"] = zones.validate_polygon(body["polygon"])
+        except (ValueError, TypeError) as e:
+            raise HTTPException(status_code=400, detail=f"bad polygon: {e}")
+    if "enabled" in body:
+        fields["enabled"] = bool(body["enabled"])
+    updated = zones.update_roi(_CONFIG_DB, roi_id, fields)
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"no ROI {roi_id}")
+    return updated
+
+
+@app.delete("/api/rois/{roi_id}")
+async def api_rois_delete(roi_id: int) -> dict:
+    if not zones.delete_roi(_CONFIG_DB, roi_id):
+        raise HTTPException(status_code=404, detail=f"no ROI {roi_id}")
+    return {"deleted": True}
+
+
+@app.get("/api/alert-rules")
+async def api_rules_list(cam: str | None = None) -> list[dict]:
+    if cam is not None:
+        _require_camera(cam)
+    return zones.list_rules(_CONFIG_DB, camera=cam)
+
+
+@app.post("/api/alert-rules")
+async def api_rules_create(body: dict) -> dict:
+    cam = str(body.get("camera", ""))
+    _require_camera(cam)
+    try:
+        roi_id = int(body["roi_id"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="roi_id is required")
+    roi = zones.get_roi(_CONFIG_DB, roi_id)
+    if roi is None or roi["camera"] != cam:
+        raise HTTPException(status_code=400, detail="roi_id does not belong to camera")
+    cls = str(body.get("class", "")).strip()
+    if cls not in _emitted_classes():
+        raise HTTPException(status_code=400, detail=f"unknown class: {cls!r}")
+    min_conf = float(body.get("min_conf", 0.0) or 0.0)
+    cooldown_s = int(body.get("cooldown_s", config.notify.default_cooldown_s))
+    enabled = bool(body.get("enabled", True))
+    return zones.create_rule(_CONFIG_DB, cam, roi_id, cls, min_conf, cooldown_s, enabled)
+
+
+@app.put("/api/alert-rules/{rule_id}")
+async def api_rules_update(rule_id: int, body: dict) -> dict:
+    fields: dict = {}
+    if "class" in body:
+        cls = str(body["class"]).strip()
+        if cls not in _emitted_classes():
+            raise HTTPException(status_code=400, detail=f"unknown class: {cls!r}")
+        fields["class"] = cls
+    if "min_conf" in body:
+        fields["min_conf"] = float(body["min_conf"] or 0.0)
+    if "cooldown_s" in body:
+        fields["cooldown_s"] = int(body["cooldown_s"])
+    if "enabled" in body:
+        fields["enabled"] = bool(body["enabled"])
+    updated = zones.update_rule(_CONFIG_DB, rule_id, fields)
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"no rule {rule_id}")
+    return updated
+
+
+@app.delete("/api/alert-rules/{rule_id}")
+async def api_rules_delete(rule_id: int) -> dict:
+    if not zones.delete_rule(_CONFIG_DB, rule_id):
+        raise HTTPException(status_code=404, detail=f"no rule {rule_id}")
+    return {"deleted": True}
+
+
+# --- device registration (mobile push targets) ------------------------
+# The Flutter app swaps a Google ID token for a server JWT (/auth/exchange)
+# then registers its FCM token here so the inference notifier can push
+# alerts. Bearer-authed (same JWT the app uses elsewhere); the email comes
+# from the verified token, not the body.
+
+
+def _bearer_email(request: Request) -> str:
+    try:
+        return auth.verify_jwt(auth.extract_bearer(request.headers.get("authorization")))
+    except auth.AuthError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+
+@app.post("/api/devices")
+async def api_register_device(body: dict, request: Request) -> dict:
+    email = _bearer_email(request)
+    token = str(body.get("token", "")).strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="token is required")
+    platform = body.get("platform")
+    platform = str(platform).lower() if platform else None
+    zones.upsert_device(_CONFIG_DB, token, platform, email)
+    return {"registered": True}
+
+
+@app.delete("/api/devices/{token}")
+async def api_unregister_device(token: str, request: Request) -> dict:
+    _bearer_email(request)
+    zones.delete_device(_CONFIG_DB, token)
+    return {"deleted": True}
 
 
 # --- live overlay SSE proxy --------------------------------------------
@@ -1056,6 +1315,11 @@ async def api_training_stage_event(event_id: int) -> dict:
 @app.get("/training")
 async def view_training() -> FileResponse:
     return FileResponse(STATIC_DIR / "training.html")
+
+
+@app.get("/rois")
+async def view_rois() -> FileResponse:
+    return FileResponse(STATIC_DIR / "rois.html")
 
 
 @app.get("/")

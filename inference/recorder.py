@@ -39,6 +39,7 @@ import cv2
 from .live import broadcaster
 from .model import Detection, Detector
 from .motion import MotionDetector
+from .zones import ZoneIndex
 
 logger = logging.getLogger("belfry.inference.recorder")
 
@@ -93,6 +94,10 @@ class _Run:
     peak_bbox: tuple[float, float, float, float]
     peak_frame: object  # numpy ndarray; kept in memory until flush
     sample_count: int = 1
+    # Alert rules already fired during this run, so a subject lingering in
+    # a zone produces one alert per run, not one per frame. Cleared when
+    # the run closes; the recorder's per-rule cooldown handles re-entry.
+    alerted_rule_ids: set = field(default_factory=set)
 
 
 def init_db(db_path: Path) -> sqlite3.Connection:
@@ -134,6 +139,8 @@ class EventRecorder:
         record_fps: int,
         cooldown_s: int,
         motion_detector: MotionDetector | None = None,
+        zone_index: ZoneIndex | None = None,
+        notifier=None,
     ) -> None:
         self.camera_name = camera_name
         self.rtsp_url = rtsp_url
@@ -143,6 +150,15 @@ class EventRecorder:
         self.thumbs_dir = thumbs_dir
         self.frame_interval_s = 1.0 / max(1, record_fps)
         self.cooldown_s = cooldown_s
+        # ROI alerting (optional). zone_index reads rois/alert_rules for
+        # this camera; notifier(alert_dict) hands a fired alert off to the
+        # push sender. Both None when no zones/notifier are wired in.
+        self.zone_index = zone_index
+        self.notifier = notifier
+        # Per-rule last-fire wall-clock, so a rule's cooldown_s spans run
+        # boundaries (a person pacing in/out of a zone doesn't re-alert
+        # every time a new run opens).
+        self._rule_last_fired: dict[int, float] = {}
         # Active runs keyed by class. Multiple classes can run concurrently
         # on the same camera (a person walking a dog).
         self._runs: dict[str, _Run] = {}
@@ -296,6 +312,9 @@ class EventRecorder:
     # state machine
 
     def _update_runs(self, ts: float, dets: list[Detection], frame) -> None:
+        if self.zone_index is not None:
+            self.zone_index.maybe_refresh()
+
         # Group detections by class, keeping only the highest-conf box
         # per class for this frame (we only persist the peak anyway).
         best_by_class: dict[str, Detection] = {}
@@ -308,7 +327,7 @@ class EventRecorder:
             run = self._runs.get(cls)
             if run is None:
                 # New run starts.
-                self._runs[cls] = _Run(
+                run = _Run(
                     cls=cls,
                     ts_start=ts,
                     ts_end=ts,
@@ -317,6 +336,7 @@ class EventRecorder:
                     peak_frame=frame.copy(),
                     sample_count=1,
                 )
+                self._runs[cls] = run
                 logger.info(
                     "%s open  %s @ %.2f", self.camera_name, cls, det.conf
                 )
@@ -328,6 +348,11 @@ class EventRecorder:
                     run.max_conf = det.conf
                     run.peak_bbox = det.bbox
                     run.peak_frame = frame.copy()
+
+            # ROI alerting runs every frame (not just on run open) so a
+            # subject that walks into a zone mid-run still fires.
+            if self.zone_index is not None and self.zone_index.has_rules:
+                self._evaluate_alerts(run, cls, det, ts, frame)
 
     def _close_stale_runs(self, ts: float) -> None:
         stale = [c for c, r in self._runs.items() if (ts - r.ts_end) > self.cooldown_s]
@@ -398,4 +423,81 @@ class EventRecorder:
             return str(out_path.relative_to(self.thumbs_dir))
         except Exception:
             logger.exception("thumbnail save failed")
+            return None
+
+    # ------------------------------------------------------------------
+    # ROI alerting
+
+    def _evaluate_alerts(self, run: _Run, cls: str, det: Detection, ts: float, frame) -> None:
+        for m in self.zone_index.matches(cls, det.conf, det.bbox):
+            rid = m["rule_id"]
+            if rid in run.alerted_rule_ids:
+                continue  # already fired for this run
+            last = self._rule_last_fired.get(rid, 0.0)
+            if (ts - last) < (m["cooldown_s"] or 0):
+                continue  # within this rule's cooldown
+            self._fire_alert(m, cls, det, ts, frame)
+            run.alerted_rule_ids.add(rid)
+            self._rule_last_fired[rid] = ts
+
+    def _fire_alert(self, match: dict, cls: str, det: Detection, ts: float, frame) -> None:
+        thumb_rel = self._save_alert_thumb(frame, det.bbox, cls, match["polygon"], ts)
+        assert self._db is not None  # only reachable inside run()
+        cur = self._db.execute(
+            """
+            INSERT INTO alerts
+              (rule_id, camera, roi_id, roi_name, class, ts, conf, peak_bbox, thumb_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                match["rule_id"],
+                self.camera_name,
+                match["roi_id"],
+                match["roi_name"],
+                cls,
+                ts,
+                det.conf,
+                json.dumps(list(det.bbox)),
+                thumb_rel,
+            ),
+        )
+        logger.info(
+            "%s ALERT %s in %r (rule %d) conf=%.2f",
+            self.camera_name, cls, match["roi_name"], match["rule_id"], det.conf,
+        )
+        if self.notifier is not None:
+            try:
+                self.notifier({
+                    "id": cur.lastrowid,
+                    "camera": self.camera_name,
+                    "roi_id": match["roi_id"],
+                    "roi_name": match["roi_name"],
+                    "class": cls,
+                    "ts": ts,
+                    "conf": det.conf,
+                    "thumb_path": thumb_rel,
+                })
+            except Exception:
+                logger.exception("notifier raised for alert on %s", self.camera_name)
+
+    def _save_alert_thumb(self, frame, bbox, cls: str, polygon, ts: float) -> str | None:
+        try:
+            day = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+            out_dir = self.thumbs_dir / self.camera_name / "alerts" / day
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / f"{ts:.3f}_{cls}.jpg"
+            img = frame.copy()
+            draw_thumb_bbox(img, bbox, cls)
+            # ROI outline in yellow (BGR) so it's distinct from the class
+            # box colours, making it obvious which zone fired.
+            h, w = img.shape[:2]
+            n = len(polygon)
+            for i in range(n):
+                x1 = int(round(polygon[i][0] * w)); y1 = int(round(polygon[i][1] * h))
+                x2 = int(round(polygon[(i + 1) % n][0] * w)); y2 = int(round(polygon[(i + 1) % n][1] * h))
+                cv2.line(img, (x1, y1), (x2, y2), (0, 255, 255), max(2, h // 360))
+            cv2.imwrite(str(out_path), img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            return str(out_path.relative_to(self.thumbs_dir))
+        except Exception:
+            logger.exception("alert thumbnail save failed")
             return None

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>belfry · regions &amp; alerts</title>
+  <link rel="stylesheet" href="/static/viewer.css?v=26">
+  <script defer src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+  <script defer src="/static/rois.js?v=1"></script>
+</head>
+<body class="rois-body">
+  <header>
+    <h1>belfry</h1>
+    <nav id="set-nav">
+      <a href="/">&larr; All cameras</a>
+      <a href="/events">Events</a>
+    </nav>
+    <label class="cam-picker">
+      Camera
+      <select id="cam-select"></select>
+    </label>
+    <span id="status" class="status-pill"></span>
+  </header>
+
+  <main class="rois-main">
+    <section class="rois-stage">
+      <div class="roi-toolbar">
+        <button id="freeze-btn" type="button" class="chip">Freeze frame</button>
+        <button id="draw-btn" type="button" class="chip primary">+ New region</button>
+        <button id="finish-btn" type="button" class="chip" hidden>Finish (Enter)</button>
+        <button id="cancel-btn" type="button" class="chip" hidden>Cancel (Esc)</button>
+        <input id="roi-name" type="text" placeholder="Region name" hidden>
+        <button id="save-roi-btn" type="button" class="chip primary" hidden>Save region</button>
+        <span id="draw-hint" class="muted"></span>
+      </div>
+      <div class="video-wrap roi-wrap">
+        <video id="roi-video" muted autoplay playsinline></video>
+        <canvas id="roi-canvas" class="roi-canvas"></canvas>
+      </div>
+    </section>
+
+    <aside class="rois-side">
+      <div class="panel">
+        <h2>Regions</h2>
+        <ul id="roi-list" class="roi-list"></ul>
+        <p id="roi-empty" class="muted" hidden>No regions yet. Click “New region”, click to drop points, Enter to finish.</p>
+      </div>
+
+      <div class="panel">
+        <h2>Alert rules</h2>
+        <ul id="rule-list" class="rule-list"></ul>
+        <p id="rule-empty" class="muted" hidden>No rules yet.</p>
+        <form id="rule-form" class="rule-form">
+          <label class="rule-num">region
+            <select id="rule-roi" required></select>
+          </label>
+          <label class="rule-num">class
+            <select id="rule-class" required></select>
+          </label>
+          <label class="rule-num">conf ≥
+            <input id="rule-conf" type="number" min="0" max="1" step="0.05" value="0.4">
+          </label>
+          <label class="rule-num">cooldown
+            <input id="rule-cooldown" type="number" min="0" step="5" value="60">s
+          </label>
+          <button type="submit" class="chip primary">Add rule</button>
+        </form>
+      </div>
+    </aside>
+  </main>
+
+  <template id="roi-item-template">
+    <li class="roi-item">
+      <button type="button" class="roi-swatch" title="Show/hide on canvas"></button>
+      <span class="roi-item-name"></span>
+      <label class="roi-enabled"><input type="checkbox"> on</label>
+      <button type="button" class="roi-del" title="Delete region">✕</button>
+    </li>
+  </template>
+
+  <template id="rule-item-template">
+    <li class="rule-item">
+      <span class="rule-desc"></span>
+      <label class="roi-enabled"><input type="checkbox"> on</label>
+      <button type="button" class="rule-del" title="Delete rule">✕</button>
+    </li>
+  </template>
+</body>
+</html>

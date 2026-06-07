@@ -27,8 +27,10 @@ import uvicorn
 from dvr.config import load_config
 from .model import Detector
 from .motion import MotionDetector
+from .notify import FcmNotifier
 from .recorder import EventRecorder
 from .server import app as inference_app
+from .zones import ZoneIndex
 
 logger = logging.getLogger("belfry.inference.runner")
 
@@ -112,6 +114,15 @@ def main() -> int:
     inference_app.state.db_path = inf.db_path
     inf.thumbs_dir.mkdir(parents=True, exist_ok=True)
 
+    # FCM push for ROI alerts. Disabled (no-op enqueue) when no
+    # credentials JSON is configured — alerts still persist + serve.
+    notifier = FcmNotifier(
+        inf.config_db_path,
+        cfg.notify.fcm_credentials_path,
+        cfg.notify.fcm_project_id,
+    )
+    notifier.start()
+
     stop = threading.Event()
 
     def _on_signal(signum, _frame):
@@ -150,6 +161,7 @@ def main() -> int:
                 min_persistence_frames=inf.motion_min_persistence_frames,
             )
             logger.info("motion detector enabled for %s", cam.name)
+        zone_index = ZoneIndex(inf.config_db_path, cam.name)
         recorder = EventRecorder(
             camera_name=cam.name,
             rtsp_url=loopback_rtsp,
@@ -159,6 +171,8 @@ def main() -> int:
             record_fps=inf.record_fps,
             cooldown_s=inf.cooldown_s,
             motion_detector=motion_detector,
+            zone_index=zone_index,
+            notifier=notifier.enqueue,
         )
         t = threading.Thread(
             target=recorder.run,
@@ -186,6 +200,7 @@ def main() -> int:
         t.join(timeout=30.0)
         if t.is_alive():
             logger.warning("thread %s did not join within 30s", t.name)
+    notifier.stop()
     logger.info("all recorders stopped")
     return 0
 

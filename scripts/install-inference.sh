@@ -88,6 +88,16 @@ if ! python -c "import fastapi, uvicorn, httpx" 2>/dev/null; then
     pip install fastapi 'uvicorn[standard]' httpx
 fi
 
+# google-auth mints the OAuth2 bearer token for FCM HTTP v1 (ROI alert
+# push, inference/notify.py). Optional at runtime — the notifier disables
+# push gracefully if it's missing — but install it so push works once a
+# Firebase service-account JSON is configured. (requests, the HTTP client
+# notify.py POSTs with, already rides in as an ultralytics dependency.)
+if ! python -c "import google.auth" 2>/dev/null; then
+    echo "==> installing google-auth (FCM push token minting)"
+    pip install google-auth
+fi
+
 # --- onnx export deps ---------------------------------------------------
 # Needed by ultralytics' TRT export pipeline (torch → ONNX → TensorRT).
 # Ultralytics tries to AutoUpdate-install them on demand, but its

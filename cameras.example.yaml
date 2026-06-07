@@ -51,6 +51,22 @@ inference:
     var_threshold: 25       # higher → less sensitive (16 fires on noise)
     min_blob_pct: 0.005     # ignore blobs <0.5% of the 640x360 proc frame
     min_persistence_frames: 2  # box must appear in N consecutive ticks
+  # config_db_path: ./recordings/config.db  # ROIs / alert rules / device
+  #                                          # tokens. Default shown; kept
+  #                                          # out of events.db so rebuilding
+  #                                          # derived data never wipes zones.
+
+# ROI alerts → mobile push. Draw named polygonal regions per camera at
+# /rois and add rules (class-in-region). The recorder fires an alert when
+# a matching detection enters a region; alerts persist to events.db and
+# serve over /api/alerts. Push to the mobile app uses Firebase Cloud
+# Messaging — leave fcm_credentials_path unset and push is simply off
+# (alerts still persist + serve); set it to a Firebase service-account
+# JSON to enable. iOS also needs an APNs key uploaded to Firebase.
+alerts:
+  # fcm_credentials_path: /etc/belfry/fcm-service-account.json
+  # fcm_project_id: ""        # optional; read from the JSON if omitted
+  default_cooldown_s: 60       # min seconds between alerts for one rule
 
 sets:
   - id: set1

@@ -84,6 +84,10 @@ class Inference:
     thumbs_dir: Path
     # SQLite events DB.
     db_path: Path
+    # SQLite config DB — ROIs, alert rules, device tokens. Kept separate
+    # from db_path so rebuilding derived event data never wipes the
+    # hand-drawn zones / rules.
+    config_db_path: Path
     # Motion-detection knobs (OpenCV MOG2). Default off; per-camera
     # ``motion`` override on Camera flips it on per cam.
     motion_enabled: bool
@@ -99,12 +103,26 @@ class Inference:
 
 
 @dataclass(frozen=True)
+class Notify:
+    """Mobile push (FCM) settings. The feature degrades gracefully: with
+    no credentials file present the sender logs once and no-ops, so the
+    pull API + ROI editor work without any Firebase setup."""
+    # Path to a Firebase service-account JSON. Empty/missing → push off.
+    fcm_credentials_path: Path | None
+    # FCM project id. If empty, read from the credentials JSON.
+    fcm_project_id: str
+    # Default per-rule cooldown when a rule doesn't specify one.
+    default_cooldown_s: int
+
+
+@dataclass(frozen=True)
 class Config:
     hls_base: str
     sets: tuple[CameraSet, ...]
     recording: Recording
     retention: Retention
     inference: Inference
+    notify: Notify
 
     def get_set(self, id: str) -> CameraSet | None:
         return next((s for s in self.sets if s.id == id), None)
@@ -170,11 +188,24 @@ def _load_inference(raw: dict, project_root: Path, recording: Recording) -> Infe
         db_path=_resolve(
             block.get("db_path", recording.path / "events.db"), project_root
         ),
+        config_db_path=_resolve(
+            block.get("config_db_path", recording.path / "config.db"), project_root
+        ),
         motion_enabled=bool(motion.get("enabled", False)),
         motion_history=int(motion.get("history", 500)),
         motion_var_threshold=int(motion.get("var_threshold", 25)),
         motion_min_blob_pct=float(motion.get("min_blob_pct", 0.005)),
         motion_min_persistence_frames=int(motion.get("min_persistence_frames", 2)),
+    )
+
+
+def _load_notify(raw: dict, project_root: Path) -> Notify:
+    block = raw.get("alerts") or {}
+    creds = block.get("fcm_credentials_path")
+    return Notify(
+        fcm_credentials_path=(_resolve(creds, project_root) if creds else None),
+        fcm_project_id=str(block.get("fcm_project_id", "")),
+        default_cooldown_s=int(block.get("default_cooldown_s", 60)),
     )
 
 
@@ -226,4 +257,5 @@ def load_config(path: Path | str = "cameras.yaml") -> Config:
         recording=recording,
         retention=retention,
         inference=_load_inference(raw, project_root, recording),
+        notify=_load_notify(raw, project_root),
     )

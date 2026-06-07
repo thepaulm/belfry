@@ -44,6 +44,7 @@ class RetentionStatus:
     # link regardless of disk pressure.
     last_events_evicted: int = 0
     last_thumbs_evicted: int = 0
+    last_alerts_evicted: int = 0
     last_error: str | None = None
 
 
@@ -122,6 +123,7 @@ class RetentionLoop:
         self.status.last_evicted_bytes = 0
         self.status.last_events_evicted = 0
         self.status.last_thumbs_evicted = 0
+        self.status.last_alerts_evicted = 0
 
         if self.status.used_pct < self.retention.evict_high_pct:
             self._sweep_events(segments)
@@ -270,6 +272,8 @@ class RetentionLoop:
                         (cam, cutoff),
                     )
                     rows_evicted += len(rows)
+
+                alerts_evicted = self._sweep_alerts(conn, oldest_per_cam)
             finally:
                 conn.close()
         except sqlite3.Error as e:
@@ -278,12 +282,47 @@ class RetentionLoop:
 
         self.status.last_events_evicted = rows_evicted
         self.status.last_thumbs_evicted = thumbs_evicted
-        if rows_evicted:
+        self.status.last_alerts_evicted = alerts_evicted
+        if rows_evicted or alerts_evicted:
             logger.info(
-                "retention: evicted %d events + %d thumbs (footage gone)",
+                "retention: evicted %d events + %d thumbs + %d alerts (footage gone)",
                 rows_evicted,
                 thumbs_evicted,
+                alerts_evicted,
             )
+
+    def _sweep_alerts(
+        self, conn: sqlite3.Connection, oldest_per_cam: dict[str, float]
+    ) -> int:
+        """Delete alert rows (+ their thumbs) whose footage has been
+        evicted, mirroring the events sweep. Same connection so it shares
+        the events.db writer slot. No-op if the table doesn't exist yet."""
+        try:
+            cams = [r[0] for r in conn.execute("SELECT DISTINCT camera FROM alerts")]
+        except sqlite3.OperationalError:
+            return 0  # alerts table not created yet
+        evicted = 0
+        for cam in cams:
+            cutoff = oldest_per_cam.get(cam, float("inf"))
+            rows = list(
+                conn.execute(
+                    "SELECT id, thumb_path FROM alerts WHERE camera = ? AND ts < ?",
+                    (cam, cutoff),
+                )
+            )
+            if not rows:
+                continue
+            for _id, thumb_rel in rows:
+                if thumb_rel:
+                    try:
+                        (self.inference.thumbs_dir / thumb_rel).unlink(missing_ok=True)
+                    except OSError as e:
+                        logger.warning("alert thumb unlink failed: %s: %s", thumb_rel, e)
+            conn.execute(
+                "DELETE FROM alerts WHERE camera = ? AND ts < ?", (cam, cutoff)
+            )
+            evicted += len(rows)
+        return evicted
 
     def status_dict(self) -> dict:
         return asdict(self.status)
