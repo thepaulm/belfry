@@ -48,8 +48,25 @@ class PushService {
 
   String? _token;
   bool _started = false;
+  bool _registeredThisSession = false;
 
-  Future<void> start() async {
+  // Called by main on every auth change. Splits the one-time messaging
+  // setup (_ensureStarted) from per-session token registration: sign-out
+  // deregisters the token, so a sign-out → sign-in within the same app run
+  // must re-register or push silently stays off until an app restart.
+  Future<void> onAuthChanged() async {
+    if (auth.session == null) {
+      _registeredThisSession = false; // re-register on the next sign-in
+      return;
+    }
+    await _ensureStarted();
+    if (!_registeredThisSession) {
+      _registeredThisSession = true;
+      await _registerToken();
+    }
+  }
+
+  Future<void> _ensureStarted() async {
     if (_started) return;
     _started = true;
 
@@ -78,7 +95,6 @@ class PushService {
         >()
         ?.createNotificationChannel(_androidChannel);
 
-    await _registerToken();
     messaging.onTokenRefresh.listen((t) {
       _token = t;
       _register(t);

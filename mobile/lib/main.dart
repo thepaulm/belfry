@@ -48,10 +48,11 @@ class _BelfryAppState extends State<BelfryApp> {
     _auth.bootstrap();
   }
 
-  // Start push once we hold a JWT — device registration is a bearer call,
-  // so it can't run before sign-in. start() is idempotent.
+  // Drive push off every auth transition — device registration is a bearer
+  // call so it can't run before sign-in, and a sign-out → sign-in must
+  // re-register the token. PushService dedupes the work internally.
   void _onAuthChanged() {
-    if (_auth.session != null) _push.start();
+    _push.onAuthChanged();
   }
 
   @override

@@ -166,7 +166,11 @@ class _LiveTileState extends State<_LiveTile> {
     _inferenceSub = null;
     _inference?.dispose();
     _inference = null;
-    if (mounted) setState(() => _detections = const []);
+    // `!_disposed`, not just `mounted`: during dispose() the element is
+    // already defunct but `mounted` is still true (it flips false only
+    // after dispose returns), so a bare mounted-guarded setState here
+    // still throws. _disposed is set at the top of dispose().
+    if (mounted && !_disposed) setState(() => _detections = const []);
   }
 
   Future<void> _initController() async {
