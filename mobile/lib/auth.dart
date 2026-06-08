@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:http/http.dart' as http;
@@ -34,6 +35,28 @@ class AuthSession {
 class AuthService extends ChangeNotifier {
   static const _storageKey = 'belfry-session-v1';
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
+
+  // Mirrors the session JWT into the iOS native cookie store so AVPlayer
+  // authenticates HLS/mp4 sub-requests via the `belfry_jwt` cookie (it
+  // won't forward our Authorization header to them). No-op off iOS —
+  // Android's ExoPlayer honors httpHeaders, so the header path suffices.
+  static const _cookieChannel = MethodChannel('belfry/cookies');
+
+  Future<void> _syncStreamCookie(String? token) async {
+    if (defaultTargetPlatform != TargetPlatform.iOS) return;
+    try {
+      if (token == null) {
+        await _cookieChannel.invokeMethod('clear');
+      } else {
+        await _cookieChannel.invokeMethod('set', {
+          'token': token,
+          'host': Uri.parse(AppConfig.backendBase).host,
+        });
+      }
+    } catch (e) {
+      debugPrint('stream cookie sync failed: $e');
+    }
+  }
 
   AuthSession? _session;
   AuthSession? get session => _session;
@@ -70,6 +93,12 @@ class AuthService extends ChangeNotifier {
     }
     try {
       await GoogleSignIn.instance.initialize(
+        // iOS needs its own OAuth client id; serverClientId stays the web
+        // client (the ID-token audience the backend validates). Android
+        // reads its client from google-services.json, so leave clientId null.
+        clientId: defaultTargetPlatform == TargetPlatform.iOS
+            ? AppConfig.iosClientId
+            : null,
         serverClientId: AppConfig.webClientId,
       );
     } catch (e) {
@@ -88,6 +117,7 @@ class AuthService extends ChangeNotifier {
           DateTime.now().add(AppConfig.tokenRefreshSlack),
         )) {
           _session = s;
+          await _syncStreamCookie(s.token);
         } else {
           await _storage.delete(key: _storageKey);
         }
@@ -133,6 +163,7 @@ class AuthService extends ChangeNotifier {
         value: jsonEncode(session.toJson()),
       );
       _session = session;
+      await _syncStreamCookie(session.token);
     } catch (e) {
       _error = e.toString();
     } finally {
@@ -153,6 +184,7 @@ class AuthService extends ChangeNotifier {
     // signed out of belfry the moment we drop the JWT.
     await _storage.delete(key: _storageKey);
     _session = null;
+    await _syncStreamCookie(null);
     notifyListeners();
     try {
       await GoogleSignIn.instance.signOut();

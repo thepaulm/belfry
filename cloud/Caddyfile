@@ -44,6 +44,38 @@ example.com {
 		}
 	}
 
+	# Cookie-tagged requests come from the mobile app's *media players*.
+	# iOS AVPlayer (and the underlying NSURLSession) will not attach the
+	# Authorization header to HLS segment / mp4 sub-requests, so the bearer
+	# path above never fires for them and they'd fall through to the Google
+	# redirect below — surfacing as "stream error" in the app. NSURLSession
+	# *does* send cookies on every request, including segments, so the app
+	# also stashes the JWT in a `belfry_jwt` cookie. Here we promote that
+	# cookie to a Bearer header and run the exact same /auth/verify gate.
+	# Ordered after @bearer so normal API calls (which send the header) keep
+	# using that path; this only catches requests that have the cookie but
+	# no Authorization header. No Google-redirect rewrite here either — same
+	# rationale as @bearer (an app can't render the browser flow).
+	@jwtcookie {
+		not header Authorization "Bearer *"
+		header_regexp Cookie "(^|;\s*)belfry_jwt=[^;]+"
+	}
+	handle @jwtcookie {
+		route {
+			request_header Authorization "Bearer {http.request.cookie.belfry_jwt}"
+			forward_auth 127.0.0.1:8080 {
+				uri /auth/verify
+				copy_headers X-Auth-Email
+			}
+			reverse_proxy 127.0.0.1:8080 {
+				transport http {
+					read_timeout 300s
+					write_timeout 300s
+				}
+			}
+		}
+	}
+
 	# Everything else: gate via oauth2-proxy, then proxy to the reverse-SSH
 	# tunnel into the Orin. forward_auth's default behavior is to copy the
 	# auth provider's response (a 401 with body) straight back to the

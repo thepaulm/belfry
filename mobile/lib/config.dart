@@ -19,5 +19,13 @@ class AppConfig {
     'BELFRY_WEB_CLIENT_ID',
   );
 
+  // iOS-only OAuth client ID. Unlike the web client (build config), this is
+  // committed: its reversed form must be a literal URL scheme in the bundled
+  // Info.plist anyway, so there's nothing to keep out of the repo. Passed as
+  // GoogleSignIn's `clientId` on iOS; `serverClientId` stays the web client.
+  // Android reads its own client from google-services.json and ignores this.
+  static const String iosClientId =
+      '850889416010-iv6nrj185n7tbammf8i5p74k1fep7uch.apps.googleusercontent.com';
+
   static const Duration tokenRefreshSlack = Duration(hours: 12);
 }
