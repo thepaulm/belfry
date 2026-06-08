@@ -21,6 +21,16 @@ class _EventsScreenState extends State<EventsScreen> {
   bool _atEnd = false;
   String? _error;
 
+  // Class filter chips mirror the web /events page (events.js CLASS_CHIPS).
+  // "all" disables the filter; every other value is passed straight to
+  // /api/events?class=<v>, which does an exact match — car/truck already
+  // merged into "vehicle" upstream, so they don't get their own chips.
+  static const _classChips = [
+    'all', 'person', 'animal', 'vehicle', 'motion', 'dog', 'cat', 'bird',
+    'deer', 'coyote', 'raccoon', 'rabbit', 'squirrel', 'rat',
+  ];
+  String _cls = 'all';
+
   static const _pageSize = 60;
 
   @override
@@ -38,7 +48,10 @@ class _EventsScreenState extends State<EventsScreen> {
     });
     try {
       final cams = await _api.getAllCameras();
-      final events = await _api.getEvents(limit: _pageSize);
+      final events = await _api.getEvents(
+        cls: _cls == 'all' ? null : _cls,
+        limit: _pageSize,
+      );
       if (!mounted) return;
       setState(() {
         _cameraIndex = {for (final c in cams) c.name: c};
@@ -60,6 +73,7 @@ class _EventsScreenState extends State<EventsScreen> {
     setState(() => _loadingMore = true);
     try {
       final next = await _api.getEvents(
+        cls: _cls == 'all' ? null : _cls,
         beforeId: _events.last.id,
         limit: _pageSize,
       );
@@ -76,6 +90,12 @@ class _EventsScreenState extends State<EventsScreen> {
         _error = e.toString();
       });
     }
+  }
+
+  void _selectClass(String cls) {
+    if (cls == _cls) return;
+    setState(() => _cls = cls);
+    _loadInitial();
   }
 
   void _openEvent(Event ev) {
@@ -101,9 +121,46 @@ class _EventsScreenState extends State<EventsScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Events')),
-      body: RefreshIndicator(
-        onRefresh: _loadInitial,
-        child: _body(),
+      body: Column(
+        children: [
+          _classFilterBar(),
+          Expanded(
+            child: RefreshIndicator(
+              onRefresh: _loadInitial,
+              child: _body(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _classFilterBar() {
+    return SizedBox(
+      height: 48,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        itemCount: _classChips.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (ctx, i) {
+          final cls = _classChips[i];
+          final selected = cls == _cls;
+          // "all" has no detector color; the rest borrow the bucket palette.
+          final accent =
+              cls == 'all' ? Theme.of(ctx).colorScheme.primary : eventBucketColor(cls);
+          final label = cls == 'all'
+              ? 'All'
+              : cls == 'motion'
+                  ? 'Motion'
+                  : cls;
+          return _ClassChip(
+            label: label,
+            accent: accent,
+            selected: selected,
+            onTap: () => _selectClass(cls),
+          );
+        },
       ),
     );
   }
@@ -162,12 +219,15 @@ class _EventsScreenState extends State<EventsScreen> {
 
   Widget _footer() {
     if (_atEnd) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 20),
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 20),
         child: Center(
           child: Text(
             'end of events',
-            style: TextStyle(color: Colors.white38, fontSize: 12),
+            style: TextStyle(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+              fontSize: 12,
+            ),
           ),
         ),
       );
@@ -211,6 +271,7 @@ class _EventTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = eventBucketColor(event.cls);
+    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
     return InkWell(
       onTap: onTap,
       child: Padding(
@@ -258,22 +319,22 @@ class _EventTile extends StatelessWidget {
                   const SizedBox(height: 4),
                   Text(
                     _formatTimestamp(event.tsStart),
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 12,
-                      color: Colors.white60,
+                      color: muted,
                     ),
                   ),
                   Text(
                     'conf ${event.maxConf.toStringAsFixed(2)} · ${_formatDuration(event.duration)}',
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 11,
-                      color: Colors.white38,
+                      color: muted.withValues(alpha: 0.7),
                     ),
                   ),
                 ],
               ),
             ),
-            const Icon(Icons.chevron_right, color: Colors.white38),
+            Icon(Icons.chevron_right, color: muted.withValues(alpha: 0.7)),
           ],
         ),
       ),
@@ -309,6 +370,50 @@ class _EventTile extends StatelessWidget {
                   );
                 },
               ),
+      ),
+    );
+  }
+}
+
+class _ClassChip extends StatelessWidget {
+  const _ClassChip({
+    required this.label,
+    required this.accent,
+    required this.selected,
+    required this.onTap,
+  });
+  final String label;
+  final Color accent;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: selected ? accent.withValues(alpha: 0.18) : Colors.transparent,
+      shape: StadiumBorder(
+        side: BorderSide(
+          color: selected ? accent : scheme.outlineVariant,
+          width: selected ? 1.5 : 1,
+        ),
+      ),
+      child: InkWell(
+        customBorder: const StadiumBorder(),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          child: Center(
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                color: selected ? accent : scheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
