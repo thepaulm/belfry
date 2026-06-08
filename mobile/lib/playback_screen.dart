@@ -90,13 +90,22 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
           DateTime.now().difference(_today).inSeconds.toDouble().clamp(0.0, 86399.0);
     }
     _viewStartSec = _snappedStart(_sliderSec);
-    _loadList();
     _refreshDayEvents();
     if (initial != null) {
-      _loadWindowAt(_sliderSec);
+      // Deep-link (alert/event tap): the availability ranges must be
+      // loaded before we probe for footage, or _absTimeHasFootage runs
+      // against an empty _ranges and falsely reports "no footage".
+      _loadListThenWindow(_sliderSec);
     } else {
+      _loadList();
       _enterLive();
     }
+  }
+
+  Future<void> _loadListThenWindow(double sliderSec) async {
+    await _loadList();
+    if (!mounted) return;
+    await _loadWindowAt(sliderSec);
   }
 
   double _snappedStart(double sec) {
