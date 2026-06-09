@@ -1369,6 +1369,13 @@ async def view_events() -> FileResponse:
     return FileResponse(STATIC_DIR / "events.html")
 
 
+@app.get("/alerts")
+async def view_alerts() -> FileResponse:
+    """ROI-alert history browse page (served regardless of whether the
+    events DB / alerts table exists yet — page handles the empty state)."""
+    return FileResponse(STATIC_DIR / "alerts.html")
+
+
 @app.get("/static/{path:path}")
 async def static_files(path: str) -> FileResponse:
     target = (STATIC_DIR / path).resolve()

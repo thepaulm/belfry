@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/static/viewer.css?v=27">
   <script defer src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
   <script defer src="/static/alerts.js?v=2"></script>
-  <script defer src="/static/rois.js?v=1"></script>
+  <script defer src="/static/rois.js?v=2"></script>
 </head>
 <body class="rois-body">
   <header>
@@ -33,6 +33,8 @@
         <button id="cancel-btn" type="button" class="chip" hidden>Cancel (Esc)</button>
         <input id="roi-name" type="text" placeholder="Region name" hidden>
         <button id="save-roi-btn" type="button" class="chip primary" hidden>Save region</button>
+        <button id="edit-save-btn" type="button" class="chip primary" hidden>Save changes</button>
+        <button id="edit-cancel-btn" type="button" class="chip" hidden>Cancel edit (Esc)</button>
         <span id="draw-hint" class="muted"></span>
       </div>
       <div class="video-wrap roi-wrap">
@@ -75,6 +77,8 @@
     <li class="roi-item">
       <button type="button" class="roi-swatch" title="Show/hide on canvas"></button>
       <span class="roi-item-name"></span>
+      <button type="button" class="roi-edit" title="Edit polygon">Edit</button>
+      <button type="button" class="roi-rename" title="Rename region">Rename</button>
       <label class="roi-enabled"><input type="checkbox"> on</label>
       <button type="button" class="roi-del" title="Delete region">✕</button>
     </li>

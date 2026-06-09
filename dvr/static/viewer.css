@@ -716,6 +716,24 @@ main#events-grid {
   font-variant-numeric: tabular-nums;
 }
 
+/* ROI name on alert cards — bottom-left of the thumb, so it doesn't
+   collide with the class/conf badges along the top. */
+.alert-roi-badge {
+  position: absolute;
+  bottom: 4px;
+  left: 4px;
+  max-width: calc(100% - 8px);
+  font-size: 0.75rem;
+  padding: 0.15em 0.45em;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.65);
+  color: var(--fg);
+  pointer-events: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .event-meta {
   display: flex;
   flex-wrap: wrap;
@@ -1322,6 +1340,17 @@ main#events-grid {
   padding: 0 0.2em;
 }
 .roi-del:hover, .rule-del:hover { color: var(--offline); }
+.roi-edit, .roi-rename {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 0 0.2em;
+  flex: 0 0 auto;
+}
+.roi-edit:hover, .roi-rename:hover { color: var(--accent); }
+.roi-item.editing .roi-item-name { color: var(--accent); font-weight: 600; }
 
 .rule-form {
   display: flex;

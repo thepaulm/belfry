@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>belfry · events</title>
+  <title>belfry · alerts</title>
   <link rel="stylesheet" href="/static/viewer.css?v=27">
   <script defer src="/static/alerts.js?v=2"></script>
-  <script defer src="/static/events.js?v=5"></script>
+  <script defer src="/static/alerts-page.js?v=2"></script>
 </head>
 <body class="events-body">
   <header>
@@ -16,9 +16,8 @@
     </nav>
     <span id="status" class="status-pill"></span>
     <button id="alerts-toggle" class="labels-toggle" type="button" aria-pressed="false" title="Browser notifications for ROI alerts">🔔 Alerts</button>
-    <a class="header-action" href="/alerts">Alerts &rarr;</a>
+    <a class="header-action" href="/events">Events &rarr;</a>
     <a class="header-action" href="/rois">Regions &rarr;</a>
-    <a id="to-labeler" class="header-action" href="/training">Labeler &rarr;</a>
   </header>
 
   <div class="events-filters">
@@ -45,22 +44,20 @@
 
   <div id="events-footer">
     <button id="load-more" type="button" hidden>Load more</button>
-    <span id="empty-msg" class="muted" hidden>No events match the current filters.</span>
+    <span id="empty-msg" class="muted" hidden>No alerts match the current filters.</span>
   </div>
 
-  <template id="event-card-template">
+  <template id="alert-card-template">
     <a class="event-card" href="#">
       <div class="event-thumb-wrap">
         <img class="event-thumb" loading="lazy" alt="">
         <span class="event-class-badge"></span>
         <span class="event-conf-badge"></span>
+        <span class="alert-roi-badge"></span>
       </div>
       <div class="event-meta">
         <span class="event-cam"></span>
         <span class="event-time"></span>
-        <span class="event-dur muted"></span>
-        <button type="button" class="event-capture-link" title="Capture this frame as a training image">📷</button>
-        <button type="button" class="event-stage-link" title="Stage this event as a training image (clean frame + pre-seeded box)">📥</button>
       </div>
     </a>
   </template>

@@ -23,6 +23,8 @@ const els = {
   cancel: document.getElementById("cancel-btn"),
   name: document.getElementById("roi-name"),
   saveRoi: document.getElementById("save-roi-btn"),
+  editSave: document.getElementById("edit-save-btn"),
+  editCancel: document.getElementById("edit-cancel-btn"),
   hint: document.getElementById("draw-hint"),
   roiList: document.getElementById("roi-list"),
   roiEmpty: document.getElementById("roi-empty"),
@@ -48,7 +50,14 @@ const state = {
   rules: [],
   hidden: new Set(),       // roi ids the user toggled off the canvas
   draw: { active: false, points: [] },
+  // Polygon-edit mode for an existing ROI: working copy of its points
+  // with draggable vertices. selIdx is the highlighted/deletable vertex.
+  edit: { active: false, roiId: null, name: "", points: [], selIdx: null, dragIdx: null },
 };
+
+// Pixel hit radii for the polygon editor (vertex grab / edge-insert).
+const VERTEX_HIT_PX = 11;
+const EDGE_HIT_PX = 8;
 
 // --------------------------------------------------------------- fetch
 async function fetchJSON(url) {
@@ -148,12 +157,31 @@ function render() {
   ctx.clearRect(0, 0, els.canvas.width, els.canvas.height);
   state.rois.forEach((roi, i) => {
     if (state.hidden.has(roi.id)) return;
+    // The ROI being edited is drawn from the working copy below, not here.
+    if (state.edit.active && roi.id === state.edit.roiId) return;
     drawPolygon(roi.polygon, colorFor(i), {
       close: true, vertices: false, label: roi.name + (roi.enabled ? "" : " (off)"),
     });
   });
   if (state.draw.active) {
     drawPolygon(state.draw.points, "#ffffff", { close: false, vertices: true });
+  }
+  if (state.edit.active) {
+    const i = state.rois.findIndex((r) => r.id === state.edit.roiId);
+    const color = colorFor(i < 0 ? 0 : i);
+    drawPolygon(state.edit.points, color, {
+      close: true, vertices: true, selected: true, label: state.edit.name + " (editing)",
+    });
+    // Ring the selected vertex so it's clear which one Delete will remove.
+    if (state.edit.selIdx != null && state.edit.points[state.edit.selIdx]) {
+      const w = els.canvas.width, h = els.canvas.height;
+      const [vx, vy] = state.edit.points[state.edit.selIdx];
+      ctx.beginPath();
+      ctx.arc(vx * w, vy * h, 7, 0, Math.PI * 2);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#ffffff";
+      ctx.stroke();
+    }
   }
 }
 
@@ -175,6 +203,7 @@ function setDrawControls(on) {
 }
 
 function startDraw() {
+  cancelEdit();
   state.draw = { active: true, points: [] };
   setDrawControls(true);
   els.name.value = "";
@@ -210,6 +239,129 @@ async function saveDraw() {
   } catch (e) { flash(`save failed: ${e.message}`, true); }
 }
 
+// --------------------------------------------------------------- edit flow
+function setEditControls(on) {
+  els.editSave.hidden = !on;
+  els.editCancel.hidden = !on;
+  els.draw.hidden = on;          // can't start a new region while editing
+  els.hint.textContent = on
+    ? "Drag a vertex to move · click an edge to add a point · select + Delete to remove · Enter to save"
+    : "";
+}
+
+function startEdit(roi) {
+  cancelDraw();
+  state.edit = {
+    active: true, roiId: roi.id, name: roi.name,
+    points: roi.polygon.map((p) => [p[0], p[1]]),   // deep copy
+    selIdx: null, dragIdx: null,
+  };
+  setEditControls(true);
+  renderRoiList();
+  render();
+  flash(`editing “${roi.name}”`);
+}
+
+function cancelEdit() {
+  if (!state.edit.active) return;
+  state.edit = { active: false, roiId: null, name: "", points: [], selIdx: null, dragIdx: null };
+  setEditControls(false);
+  renderRoiList();
+  render();
+}
+
+async function saveEdit() {
+  if (!state.edit.active) return;
+  if (state.edit.points.length < 3) { flash("a region needs at least 3 points", true); return; }
+  const id = state.edit.roiId, name = state.edit.name;
+  const polygon = state.edit.points;
+  try {
+    await sendJSON("PUT", `/api/rois/${id}`, { polygon });
+    cancelEdit();
+    await loadRois();
+    flash(`updated “${name}”`);
+  } catch (e) { flash(`save failed: ${e.message}`, true); }
+}
+
+async function renameRoi(roi) {
+  const next = prompt(`Rename region “${roi.name}” to:`, roi.name);
+  if (next == null) return;                 // cancelled
+  const name = next.trim();
+  if (!name) { flash("name required", true); return; }
+  if (name === roi.name) return;
+  try {
+    await sendJSON("PUT", `/api/rois/${roi.id}`, { name });
+    if (state.edit.active && state.edit.roiId === roi.id) state.edit.name = name;
+    await loadRois();
+    await loadRules();                      // rule descriptions show the region name
+    flash(`renamed to “${name}”`);
+  } catch (e) { flash(`rename failed: ${e.message}`, true); }
+}
+
+// Hit-tests in pixel space against the edit working-copy polygon.
+function nearestVertexIdx(px, py) {
+  const w = els.canvas.width, h = els.canvas.height;
+  let best = null, bestD = VERTEX_HIT_PX;
+  state.edit.points.forEach(([x, y], i) => {
+    const d = Math.hypot(x * w - px, y * h - py);
+    if (d <= bestD) { bestD = d; best = i; }
+  });
+  return best;
+}
+
+function nearestEdgeIdx(px, py) {
+  const w = els.canvas.width, h = els.canvas.height;
+  const pts = state.edit.points, n = pts.length;
+  let best = null, bestD = EDGE_HIT_PX;
+  for (let i = 0; i < n; i++) {
+    const [ax, ay] = pts[i], [bx, by] = pts[(i + 1) % n];
+    const ax2 = ax * w, ay2 = ay * h, bx2 = bx * w, by2 = by * h;
+    const dx = bx2 - ax2, dy = by2 - ay2;
+    const len2 = dx * dx + dy * dy || 1;
+    let t = ((px - ax2) * dx + (py - ay2) * dy) / len2;
+    t = Math.max(0, Math.min(1, t));
+    const d = Math.hypot(ax2 + t * dx - px, ay2 + t * dy - py);
+    if (d <= bestD) { bestD = d; best = i; }
+  }
+  return best;
+}
+
+function onEditPointerDown(ev) {
+  if (!state.edit.active) return;
+  const [nx, ny] = pointFromEvent(ev);
+  const w = els.canvas.width, h = els.canvas.height;
+  const px = nx * w, py = ny * h;
+  const vi = nearestVertexIdx(px, py);
+  if (vi != null) {
+    state.edit.selIdx = state.edit.dragIdx = vi;
+    els.canvas.setPointerCapture(ev.pointerId);
+    render();
+    return;
+  }
+  const ei = nearestEdgeIdx(px, py);
+  if (ei != null) {                          // insert a vertex on the edge, then drag it
+    state.edit.points.splice(ei + 1, 0, [nx, ny]);
+    state.edit.selIdx = state.edit.dragIdx = ei + 1;
+    els.canvas.setPointerCapture(ev.pointerId);
+    render();
+    return;
+  }
+  state.edit.selIdx = null;
+  render();
+}
+
+function onEditPointerMove(ev) {
+  if (!state.edit.active || state.edit.dragIdx == null) return;
+  state.edit.points[state.edit.dragIdx] = pointFromEvent(ev);
+  render();
+}
+
+function onEditPointerUp(ev) {
+  if (state.edit.dragIdx == null) return;
+  state.edit.dragIdx = null;
+  try { els.canvas.releasePointerCapture(ev.pointerId); } catch {}
+}
+
 // --------------------------------------------------------------- ROIs
 async function loadRois() {
   state.rois = await fetchJSON(`/api/rois?cam=${encodeURIComponent(state.cam.name)}`);
@@ -232,6 +384,12 @@ function renderRoiList() {
       renderRoiList(); render();
     });
     li.querySelector(".roi-item-name").textContent = roi.name;
+    if (state.edit.active && state.edit.roiId === roi.id) li.classList.add("editing");
+    li.querySelector(".roi-edit").addEventListener("click", () => {
+      if (state.edit.active && state.edit.roiId === roi.id) cancelEdit();
+      else startEdit(roi);
+    });
+    li.querySelector(".roi-rename").addEventListener("click", () => renameRoi(roi));
     const cb = li.querySelector(".roi-enabled input");
     cb.checked = roi.enabled;
     cb.addEventListener("change", async () => {
@@ -321,6 +479,7 @@ async function selectCamera(name) {
   if (!state.cam) return;
   state.hidden.clear();
   cancelDraw();
+  cancelEdit();
   els.camSelect.value = state.cam.name;
   const url = new URL(window.location);
   url.searchParams.set("cam", state.cam.name);
@@ -359,6 +518,8 @@ async function init() {
   els.finish.addEventListener("click", finishDraw);
   els.cancel.addEventListener("click", cancelDraw);
   els.saveRoi.addEventListener("click", saveDraw);
+  els.editSave.addEventListener("click", saveEdit);
+  els.editCancel.addEventListener("click", cancelEdit);
   els.ruleForm.addEventListener("submit", addRule);
 
   els.canvas.addEventListener("click", (ev) => {
@@ -369,14 +530,33 @@ async function init() {
   els.canvas.addEventListener("dblclick", (ev) => {
     if (state.draw.active) { ev.preventDefault(); finishDraw(); }
   });
+  els.canvas.addEventListener("pointerdown", onEditPointerDown);
+  els.canvas.addEventListener("pointermove", onEditPointerMove);
+  els.canvas.addEventListener("pointerup", onEditPointerUp);
   document.addEventListener("keydown", (ev) => {
-    if (!state.draw.active) return;
-    if (ev.key === "Enter") { ev.preventDefault(); finishDraw(); }
-    else if (ev.key === "Escape") { cancelDraw(); }
-    else if (ev.key === "Backspace" && document.activeElement !== els.name) {
-      ev.preventDefault();
-      state.draw.points.pop();
-      render();
+    if (state.draw.active) {
+      if (ev.key === "Enter") { ev.preventDefault(); finishDraw(); }
+      else if (ev.key === "Escape") { cancelDraw(); }
+      else if (ev.key === "Backspace" && document.activeElement !== els.name) {
+        ev.preventDefault();
+        state.draw.points.pop();
+        render();
+      }
+      return;
+    }
+    if (state.edit.active) {
+      if (ev.key === "Enter") { ev.preventDefault(); saveEdit(); }
+      else if (ev.key === "Escape") { cancelEdit(); }
+      else if ((ev.key === "Delete" || ev.key === "Backspace") && state.edit.selIdx != null) {
+        ev.preventDefault();
+        if (state.edit.points.length > 3) {
+          state.edit.points.splice(state.edit.selIdx, 1);
+          state.edit.selIdx = null;
+          render();
+        } else {
+          flash("a region needs at least 3 points", true);
+        }
+      }
     }
   });
 

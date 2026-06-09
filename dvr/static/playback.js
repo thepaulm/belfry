@@ -1027,7 +1027,14 @@ function init() {
   // when not present — opening playback with the slider parked at
   // 00:00 and nothing playing isn't useful; the user almost always
   // wants "what's happening now" until they scrub back.
-  const tsParam = parseFloat(new URLSearchParams(window.location.search).get("ts"));
+  const qp = new URLSearchParams(window.location.search);
+  // Reveal the "← Alerts" header link when we arrived from /alerts, so the
+  // user can step back to the alert list they clicked from.
+  if (qp.get("from") === "alerts") {
+    const backToAlerts = document.getElementById("back-to-alerts");
+    if (backToAlerts) backToAlerts.hidden = false;
+  }
+  const tsParam = parseFloat(qp.get("ts"));
   if (Number.isFinite(tsParam) && tsParam > 0) {
     seekToTimestamp(tsParam);
   } else {
