@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io' show Platform;
 
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
@@ -128,7 +129,7 @@ class PushService {
 
   Future<void> _register(String token) async {
     try {
-      await _api.registerDevice(token, 'android');
+      await _api.registerDevice(token, Platform.isIOS ? 'ios' : 'android');
     } catch (e) {
       debugPrint('push: registerDevice failed: $e');
     }
@@ -154,20 +155,26 @@ class PushService {
     // the backgrounded FCM path; the Alerts tab is the history of record.
     final cam = (m.data['cam'] ?? '').toString();
     final id = cam.isEmpty ? 0 : (cam.hashCode & 0x7fffffff);
-    _local.show(
-      id,
-      title,
-      body,
-      const NotificationDetails(
-        android: AndroidNotificationDetails(
-          _channelId,
-          'ROI Alerts',
-          importance: Importance.high,
-          priority: Priority.high,
+    // iOS presents the foreground banner itself (setForegroundNotification-
+    // PresentationOptions); flutter_local_notifications is Android-only here
+    // (initialized with no Darwin settings), so only drive it on Android to
+    // avoid a no-op/throw and a double banner.
+    if (Platform.isAndroid) {
+      _local.show(
+        id,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            _channelId,
+            'ROI Alerts',
+            importance: Importance.high,
+            priority: Priority.high,
+          ),
         ),
-      ),
-      payload: jsonEncode(m.data),
-    );
+        payload: jsonEncode(m.data),
+      );
+    }
     unread.value += 1;
     ping.value += 1;
   }

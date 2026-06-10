@@ -110,7 +110,17 @@ class FcmNotifier:
         headers = {"Authorization": f"Bearer {access}", "Content-Type": "application/json"}
         sent = 0
         for tok in tokens:
-            msg = {"message": {"token": tok, "notification": {"title": title, "body": body}}}
+            msg = {
+                "message": {
+                    "token": tok,
+                    "notification": {"title": title, "body": body},
+                    # Without an apns block iOS may silently drop the relay.
+                    "apns": {
+                        "headers": {"apns-priority": "10"},
+                        "payload": {"aps": {"alert": {"title": title, "body": body}, "sound": "default"}},
+                    },
+                }
+            }
             if data:
                 msg["message"]["data"] = {k: str(v) for k, v in data.items()}
             try:
@@ -182,13 +192,30 @@ class FcmNotifier:
         # system silently drops every further push until the user clears the
         # tray. Per-camera (not a single global tag) keeps up to ~8 distinct
         # nudges visible; the Alerts tab holds the full history regardless.
+        # iOS gets nothing from the `android` block, and a bare `notification`
+        # relayed to APNs can be silently dropped — APNs needs an explicit
+        # high-priority push with a sound. The `apns` block is ignored on
+        # Android, so we send both unconditionally rather than branch on the
+        # device's platform. `thread-id` collapses notifications per-camera in
+        # iOS Notification Center, mirroring the Android `tag` above.
+        cam_tag = f"belfry_alert_{alert['camera']}"
         for tok in tokens:
             msg = {
                 "message": {
                     "token": tok,
                     "notification": {"title": title, "body": body},
                     "data": data,
-                    "android": {"notification": {"tag": f"belfry_alert_{alert['camera']}"}},
+                    "android": {"notification": {"tag": cam_tag}},
+                    "apns": {
+                        "headers": {"apns-priority": "10"},
+                        "payload": {
+                            "aps": {
+                                "alert": {"title": title, "body": body},
+                                "sound": "default",
+                                "thread-id": cam_tag,
+                            }
+                        },
+                    },
                 }
             }
             try:
