@@ -146,7 +146,14 @@ class PushService {
     final n = m.notification;
     final title = n?.title ?? _titleFor(m.data);
     final body = n?.body ?? _bodyFor(m.data);
-    final id = int.tryParse(m.data['alert_id'] ?? '') ?? m.hashCode;
+    // Key the tray notification on the camera (31-bit positive int), not the
+    // alert id, so a new alert for the same camera replaces the prior one
+    // instead of stacking. Undismissed per-alert notifications otherwise pile
+    // up and hit Android's hard 50-per-app cap, after which the system
+    // silently drops every further push. Mirrors the per-camera `tag` set on
+    // the backgrounded FCM path; the Alerts tab is the history of record.
+    final cam = (m.data['cam'] ?? '').toString();
+    final id = cam.isEmpty ? 0 : (cam.hashCode & 0x7fffffff);
     _local.show(
       id,
       title,

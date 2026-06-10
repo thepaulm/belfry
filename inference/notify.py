@@ -175,12 +175,20 @@ class FcmNotifier:
             "class": str(alert["class"]),
             "ts": str(alert["ts"]),
         }
+        # Collapse tray notifications per-camera via an Android `tag`: a new
+        # alert for the same camera replaces the prior one in the drawer
+        # rather than stacking. Without this, undismissed alerts accumulate
+        # and hit Android's hard 50-notifications-per-app cap, after which the
+        # system silently drops every further push until the user clears the
+        # tray. Per-camera (not a single global tag) keeps up to ~8 distinct
+        # nudges visible; the Alerts tab holds the full history regardless.
         for tok in tokens:
             msg = {
                 "message": {
                     "token": tok,
                     "notification": {"title": title, "body": body},
                     "data": data,
+                    "android": {"notification": {"tag": f"belfry_alert_{alert['camera']}"}},
                 }
             }
             try:
