@@ -10,7 +10,11 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-source scripts/runpod-version
+# Honor a VERSION inherited from the caller (runpod-auto.sh exports its
+# possibly --auto-version value); only fall back to runpod-version when run
+# standalone. Without this, an auto-version run would re-export/deploy the OLD
+# v1.1 model instead of the one just trained.
+[ -n "${VERSION:-}" ] || source scripts/runpod-version
 
 # Stop inference first so the TRT engine build doesn't fight the running
 # detector for the Jetson's (unified) GPU memory. Recording is a separate

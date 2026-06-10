@@ -345,7 +345,9 @@ if [ "$NO_SWAP" = 1 ]; then
 else
   log "TRT-export + swap into inference"
   # runpod-4 stops/starts belfry-inference (needs sudo) and flips cameras.yaml.
-  scripts/runpod-4-export-and-swap.sh
+  # Export VERSION so runpod-4 exports/deploys THIS run's model, not whatever
+  # scripts/runpod-version holds (it would otherwise re-deploy the old v1.1).
+  VERSION="$VERSION" scripts/runpod-4-export-and-swap.sh
 fi
 
 DONE_OK=1   # cleanup will push a success notification
