@@ -48,16 +48,18 @@ class FcmNotifier:
         self.enabled = False
 
     # -- lifecycle ------------------------------------------------------
-    def start(self) -> None:
-        """Load credentials and spin up the worker. No-op (disabled) if
-        credentials are absent or fail to load — push is best-effort."""
+    def _load_creds(self) -> bool:
+        """Load the service-account creds. Returns True if usable. Shared by
+        the long-lived worker (start) and the one-shot send_text path."""
+        if self._creds is not None:
+            return True
         if not self.credentials_path or not Path(self.credentials_path).is_file():
             logger.warning(
                 "FCM not configured (no credentials at %s); alerts will persist "
                 "and serve over /api/alerts but will NOT push to devices",
                 self.credentials_path,
             )
-            return
+            return False
         try:
             from google.oauth2 import service_account
             import google.auth.transport.requests as greq
@@ -73,17 +75,54 @@ class FcmNotifier:
                 "google-auth not installed in the inference venv; push disabled. "
                 "Add it via scripts/install-inference.sh."
             )
-            return
+            return False
         except Exception:
             logger.exception("FCM credentials failed to load; push disabled")
-            return
+            return False
         if not self.project_id:
             logger.warning("FCM project id unknown (not in JSON, not in config); push disabled")
+            return False
+        return True
+
+    def start(self) -> None:
+        """Load credentials and spin up the worker. No-op (disabled) if
+        credentials are absent or fail to load — push is best-effort."""
+        if not self._load_creds():
             return
         self.enabled = True
         self._thread = threading.Thread(target=self._run, name="fcm-notify", daemon=True)
         self._thread.start()
         logger.info("FCM notifier started for project %s", self.project_id)
+
+    def send_text(self, title: str, body: str, data: dict | None = None) -> int:
+        """Synchronous one-shot broadcast to every registered device — for
+        operational pings (e.g. a retrain finishing), not the alert hot path.
+        Returns the number of devices messaged. Best-effort: returns 0 if push
+        is unconfigured rather than raising."""
+        if not self._load_creds():
+            return 0
+        tokens = self._device_tokens()
+        if not tokens:
+            logger.info("no registered devices; nothing to push")
+            return 0
+        access = self._access_token()
+        url = f"https://fcm.googleapis.com/v1/projects/{self.project_id}/messages:send"
+        headers = {"Authorization": f"Bearer {access}", "Content-Type": "application/json"}
+        sent = 0
+        for tok in tokens:
+            msg = {"message": {"token": tok, "notification": {"title": title, "body": body}}}
+            if data:
+                msg["message"]["data"] = {k: str(v) for k, v in data.items()}
+            try:
+                r = requests.post(url, headers=headers, data=json.dumps(msg), timeout=_HTTP_TIMEOUT)
+            except requests.RequestException as e:
+                logger.warning("FCM POST error: %s", e)
+                continue
+            if r.status_code == 200:
+                sent += 1
+            elif r.status_code == 404 or "UNREGISTERED" in (r.text or ""):
+                self._prune_token(tok)
+        return sent
 
     def stop(self) -> None:
         self._stop.set()
@@ -187,3 +226,38 @@ class FcmNotifier:
                 conn.close()
         except sqlite3.Error as e:
             logger.warning("could not prune token: %s", e)
+
+
+def _main() -> int:
+    """One-shot CLI: broadcast a plain notification to all devices, reading
+    the same FCM config as the inference runner from cameras.yaml. Used by
+    scripts/runpod-auto.sh to ping when an unattended retrain finishes/fails.
+    Always exits 0 — a push failure must never fail the caller."""
+    import argparse
+
+    from dvr.config import load_config
+
+    ap = argparse.ArgumentParser(description="broadcast an FCM notification to all devices")
+    ap.add_argument("--title", required=True)
+    ap.add_argument("--body", required=True)
+    ap.add_argument("--config", default="cameras.yaml")
+    args = ap.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    try:
+        cfg = load_config(Path(args.config))
+        n = FcmNotifier(
+            cfg.inference.config_db_path,
+            cfg.notify.fcm_credentials_path,
+            cfg.notify.fcm_project_id,
+        )
+        # data.type lets the app skip alert deep-linking for system pings.
+        sent = n.send_text(args.title, args.body, data={"type": "system"})
+        logger.info("pushed to %d device(s)", sent)
+    except Exception:
+        logger.exception("one-shot push failed (ignored)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

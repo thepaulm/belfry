@@ -32,3 +32,6 @@ runme.sh
 camera-network-analysis.md
 sadp-reset-plan.md
 physical-reset-plan.md
+
+# runpod-auto.sh failure log
+last-retrain.log
