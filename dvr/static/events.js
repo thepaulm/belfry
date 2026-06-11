@@ -27,7 +27,7 @@ const state = {
 
 // ----- chip wiring -----------------------------------------------------
 
-function makeChips(parent, values, valueKey, isActive, onClick) {
+function makeChips(parent, values, valueKey, isActive, onClick, labelOf) {
   parent.innerHTML = "";
   for (const v of values) {
     const btn = document.createElement("button");
@@ -35,7 +35,9 @@ function makeChips(parent, values, valueKey, isActive, onClick) {
     btn.dataset[valueKey] = v;
     // "motion" isn't a real detector class — capitalise it so it reads
     // as the pseudo-class it is alongside the lowercase YOLO classes.
-    btn.textContent = v === "all" ? "All" : v === "motion" ? "Motion" : v;
+    btn.textContent = v === "all" ? "All"
+      : v === "motion" ? "Motion"
+      : labelOf ? labelOf(v) : v;
     btn.addEventListener("click", () => onClick(v));
     parent.appendChild(btn);
   }
@@ -66,6 +68,11 @@ for (const btn of windowChipsEl.querySelectorAll(".chip")) {
 // ----- camera chips: built from /api/sets ------------------------------
 
 const camToSet = new Map();   // cam name -> set id (for deep-link URLs)
+const camToLabel = new Map(); // cam name -> descriptive label (for display)
+
+function camLabel(name) {
+  return camToLabel.get(name) || name;
+}
 
 async function loadCameraChips() {
   // Pull every set's camera list to build the chip row + the cam→set
@@ -76,6 +83,7 @@ async function loadCameraChips() {
     const cams = await (await fetch(`/api/sets/${s.id}/cameras`)).json();
     for (const c of cams) {
       camToSet.set(c.name, s.id);
+      camToLabel.set(c.name, c.label);
       allCams.push(c.name);
     }
   }
@@ -85,7 +93,8 @@ async function loadCameraChips() {
       state.cam = v;
       refreshChipActiveState(camChipsEl, "cam", v);
       resetAndLoad();
-    });
+    },
+    camLabel);
 }
 
 // ----- fetch + render --------------------------------------------------
@@ -230,13 +239,13 @@ function renderEvents(events) {
     if (ev.thumb_url) {
       const img = node.querySelector(".event-thumb");
       img.src = ev.thumb_url;
-      img.alt = `${ev.class} on ${ev.camera}`;
+      img.alt = `${ev.class} on ${camLabel(ev.camera)}`;
     } else {
       node.querySelector(".event-thumb").remove();
     }
     node.querySelector(".event-class-badge").textContent = ev.class;
     node.querySelector(".event-conf-badge").textContent = ev.max_conf.toFixed(2);
-    node.querySelector(".event-cam").textContent = ev.camera;
+    node.querySelector(".event-cam").textContent = camLabel(ev.camera);
     node.querySelector(".event-time").textContent = formatTime(ev.ts_start);
     if (ev.duration_s >= 1) {
       node.querySelector(".event-dur").textContent = `· ${ev.duration_s.toFixed(0)}s`;
