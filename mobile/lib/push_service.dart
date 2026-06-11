@@ -112,6 +112,18 @@ class PushService {
       );
     }
 
+    // KNOWN GAP (iOS): tapping a notification does NOT deep-link to playback.
+    // onMessageOpenedApp / getInitialMessage are fed by firebase_messaging's
+    // UNUserNotificationCenter `didReceive response` handler, but under
+    // Flutter's implicit-engine model the plugin isn't wired into that delegate
+    // (see ios/Runner/AppDelegate.swift — we claim the delegate ourselves for
+    // token + foreground presentation). The tap callback therefore never
+    // reaches Dart. Fix when needed: implement
+    // `userNotificationCenter(_:didReceive:withCompletionHandler:)` in
+    // AppDelegate and forward the notification's userInfo to Flutter (e.g. over
+    // a MethodChannel) so this deep-link path can fire. Background/locked and
+    // foreground *presentation* already work; only the tap-to-navigate is open.
+
     auth.addSignOutHook(_deregister);
   }
 
