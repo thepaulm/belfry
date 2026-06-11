@@ -120,6 +120,18 @@ class PushService {
   // -- token registration ---------------------------------------------
   Future<void> _registerToken() async {
     try {
+      // On iOS the FCM token isn't available until APNs has handed the app a
+      // device token (AppDelegate kicks off registration + forwards it). A
+      // getToken() called too early in launch loses that race and throws
+      // `apns-token-not-set`, so wait for the APNs token first. Returns
+      // immediately once it's set; no-op on Android.
+      if (Platform.isIOS) {
+        var apns = await FirebaseMessaging.instance.getAPNSToken();
+        for (var i = 0; i < 20 && apns == null; i++) {
+          await Future.delayed(const Duration(milliseconds: 500));
+          apns = await FirebaseMessaging.instance.getAPNSToken();
+        }
+      }
       _token = await FirebaseMessaging.instance.getToken();
       if (_token != null) await _register(_token!);
     } catch (e) {

@@ -1,5 +1,6 @@
 import Flutter
 import UIKit
+import FirebaseMessaging
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
@@ -10,7 +11,42 @@ import UIKit
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
+    // With Flutter's implicit-engine model, plugins register on the engine's
+    // own pluginRegistry (see didInitializeImplicitFlutterEngine) rather than
+    // on the app delegate — so firebase_messaging is NOT wired into the
+    // UIApplicationDelegate lifecycle and never kicks off APNs registration.
+    // Do it ourselves, and forward the device token to Firebase in the
+    // didRegister callback below. Without this, getToken() fails forever with
+    // `apns-token-not-set`. Also claim the notification-center delegate so
+    // foreground presentation + notification taps reach the plugin (the
+    // implicit-engine registry doesn't wire that up either).
+    UNUserNotificationCenter.current().delegate = self
+    application.registerForRemoteNotifications()
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  override func application(
+    _ application: UIApplication,
+    didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
+  ) {
+    // Hand the APNs device token to Firebase. Use the plain property setter:
+    // it both stores the token (so the Dart getAPNSToken()/getToken() succeed)
+    // and auto-detects the APNs environment by reading the app's actual
+    // aps-environment entitlement at runtime — so a development-signed build
+    // correctly registers as sandbox. (setAPNSToken(_:type:) was tried and
+    // left getAPNSToken() reporting `apns-token-not-set`.)
+    Messaging.messaging().apnsToken = deviceToken
+    super.application(
+      application, didRegisterForRemoteNotificationsWithDeviceToken: deviceToken)
+  }
+
+  override func application(
+    _ application: UIApplication,
+    didFailToRegisterForRemoteNotificationsWithError error: Error
+  ) {
+    NSLog("belfry: APNs registration failed: \(error.localizedDescription)")
+    super.application(
+      application, didFailToRegisterForRemoteNotificationsWithError: error)
   }
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
