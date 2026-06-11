@@ -49,6 +49,24 @@ import FirebaseMessaging
       application, didFailToRegisterForRemoteNotificationsWithError: error)
   }
 
+  // Present alerts even while the app is foregrounded. We own the
+  // UNUserNotificationCenter delegate (the implicit-engine plugin registry
+  // doesn't wire firebase_messaging in), so the Dart-side
+  // setForegroundNotificationPresentationOptions request never reaches the
+  // system — without answering willPresent here, iOS shows nothing while the
+  // app is open and only renders banners when backgrounded.
+  override func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    willPresent notification: UNNotification,
+    withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+  ) {
+    if #available(iOS 14.0, *) {
+      completionHandler([.banner, .list, .sound, .badge])
+    } else {
+      completionHandler([.alert, .sound, .badge])
+    }
+  }
+
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
     registerCookieChannel(engineBridge.pluginRegistry)
