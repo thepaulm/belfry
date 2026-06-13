@@ -5,6 +5,7 @@ import contextlib
 import datetime
 import json
 import os
+import random
 import re
 import shutil
 import sqlite3
@@ -1189,32 +1190,29 @@ async def api_training_promoted_delete(filename: str) -> dict:
 _FFMPEG_BIN = "/usr/bin/ffmpeg"
 
 
-@app.post("/api/training/stage-event/{event_id}")
-async def api_training_stage_event(event_id: int) -> dict:
-    conn = _open_events_db()
-    if conn is None:
-        raise HTTPException(status_code=404, detail="no events db")
-    try:
-        row = conn.execute(
-            "SELECT camera, class, ts_start, peak_bbox, thumb_path FROM events WHERE id = ?",
-            (event_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-    if row is None:
-        raise HTTPException(status_code=404, detail=f"event {event_id} not found")
+async def _stage_event_into_staging(
+    *,
+    event_id: int,
+    cam: str,
+    cls: str,
+    ts: float,
+    thumb_rel: str | None,
+    class_map: dict,
+) -> dict:
+    """Stage one event into staging/<class>/.
 
-    cam = row["camera"]
-    cls = row["class"]
-    ts = row["ts_start"]
-    thumb_rel = row["thumb_path"]
+    Extracts a clean (un-boxed) frame for the event, drops it in the
+    class folder, pre-seeds the .txt with the event's stored boxes, and
+    records the staged filename back on the event row so /api/events can
+    report training_status. Shared by /api/training/stage-event (one
+    event) and /api/training/stage-random (a batch).
 
+    Raises HTTPException for a class that isn't a fine-tune target or a
+    frame-extraction failure; callers staging a batch catch and skip.
+    """
     # Merged detector aliases (vehicle) stage under their training class
     # (car) — see training.STAGE_CLASS_FALLBACK.
     cls = training.STAGE_CLASS_FALLBACK.get(cls, cls)
-
-    training.ensure_dataset_yaml()
-    class_map, _ = training.load_class_map()
     if cls not in class_map:
         # Legacy aggregate classes (animal/vehicle) or motion — no
         # fine-tune target. The user can add the class to dataset.yaml.
@@ -1309,6 +1307,106 @@ async def api_training_stage_event(event_id: int) -> dict:
         "category": cls,
         "filename": img_path.name,
         "seeded_boxes": len(seeded),
+    }
+
+
+@app.post("/api/training/stage-event/{event_id}")
+async def api_training_stage_event(event_id: int) -> dict:
+    conn = _open_events_db()
+    if conn is None:
+        raise HTTPException(status_code=404, detail="no events db")
+    try:
+        row = conn.execute(
+            "SELECT camera, class, ts_start, thumb_path FROM events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"event {event_id} not found")
+
+    training.ensure_dataset_yaml()
+    class_map, _ = training.load_class_map()
+    return await _stage_event_into_staging(
+        event_id=event_id,
+        cam=row["camera"],
+        cls=row["class"],
+        ts=row["ts_start"],
+        thumb_rel=row["thumb_path"],
+        class_map=class_map,
+    )
+
+
+@app.post("/api/training/stage-random")
+async def api_training_stage_random(
+    count: int = Query(default=5, ge=1, le=20),
+) -> dict:
+    """Stage up to `count` random events from the last 24h into the
+    labeler — a quick way to pull in a fresh batch of predictions to
+    correct or include. Skips events already staged/promoted and events
+    whose class isn't a fine-tune target (so the random draw never lands
+    on something that can't be staged). Each staged image lands with its
+    predicted boxes pre-seeded, exactly like the per-event Stage button.
+    """
+    conn = _open_events_db()
+    if conn is None:
+        raise HTTPException(status_code=404, detail="no events db")
+    since = time.time() - 24 * 3600
+    try:
+        rows = conn.execute(
+            "SELECT id, camera, class, ts_start, thumb_path, staged_filename "
+            "FROM events WHERE ts_end >= ? ORDER BY id DESC",
+            (since,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    training.ensure_dataset_yaml()
+    class_map, _ = training.load_class_map()
+    staging_names, promoted_names = _build_training_index()
+
+    # Candidate pool: events from the window that aren't already in the
+    # training pipeline and whose (alias-resolved) class is a fine-tune
+    # target. Filtering here means random.sample only ever picks events
+    # that can actually be staged.
+    eligible = []
+    for r in rows:
+        try:
+            staged = r["staged_filename"]
+        except (IndexError, KeyError):
+            staged = None
+        if _training_status_for(staged, staging_names, promoted_names) != "none":
+            continue
+        cls = training.STAGE_CLASS_FALLBACK.get(r["class"], r["class"])
+        if cls not in class_map:
+            continue
+        eligible.append(r)
+
+    chosen = random.sample(eligible, min(count, len(eligible)))
+
+    staged_out: list[dict] = []
+    errors: list[dict] = []
+    for r in chosen:
+        try:
+            staged_out.append(
+                await _stage_event_into_staging(
+                    event_id=r["id"],
+                    cam=r["camera"],
+                    cls=r["class"],
+                    ts=r["ts_start"],
+                    thumb_rel=r["thumb_path"],
+                    class_map=class_map,
+                )
+            )
+        except HTTPException as e:
+            # A single frame-extraction failure shouldn't sink the batch.
+            errors.append({"event_id": r["id"], "detail": e.detail})
+
+    return {
+        "requested": count,
+        "available": len(eligible),
+        "staged": staged_out,
+        "errors": errors,
     }
 
 

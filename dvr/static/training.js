@@ -60,6 +60,7 @@ const els = {
   nextBtn:       document.getElementById("next-btn"),
   imageMeta:     document.getElementById("image-meta"),
   hideBoxesBtn:  document.getElementById("hide-boxes-btn"),
+  random5Btn:    document.getElementById("random5-btn"),
 };
 
 const state = {
@@ -85,6 +86,15 @@ const state = {
 async function fetchStaging() {
   const r = await fetch("/api/training/staging", { credentials: "same-origin" });
   if (!r.ok) throw new Error(`staging ${r.status}`);
+  return r.json();
+}
+
+async function stageRandomBatch(count) {
+  const r = await fetch(`/api/training/stage-random?count=${count}`, {
+    method: "POST",
+    credentials: "same-origin",
+  });
+  if (!r.ok) throw new Error(`stage-random ${r.status}: ${await r.text()}`);
   return r.json();
 }
 
@@ -730,6 +740,67 @@ function prevImage() {
   loadAt((state.currentIdx - 1 + n) % n);
 }
 
+// ---------- Random 5 ----------
+// Pull a fresh batch of recent predictions into staging and surface them
+// in the list immediately, focused and already labeled with their boxes.
+
+async function stageRandom(count) {
+  els.random5Btn.disabled = true;
+  els.status.textContent = `staging ${count} random predictions…`;
+  // Don't lose in-flight edits; we're about to replace the whole list.
+  if (state.dirty) {
+    try { await saveCurrent({ silent: true }); } catch (_) { /* surfaced below */ }
+  }
+  try {
+    const res = await stageRandomBatch(count);
+    const data = await fetchStaging();
+    state.classes = data.classes || state.classes;
+    state.classNameById = Object.fromEntries(state.classes.map(c => [c.id, c.name]));
+    state.allImages = data.images || [];
+
+    // Reset the filter to "all" with no category so the freshly staged
+    // images are guaranteed visible regardless of any prior filter.
+    state.filter.categories.clear();
+    state.filter.state = "all";
+    for (const b of els.stateChips.querySelectorAll("button")) {
+      b.classList.toggle("active", b.dataset.state === "all");
+    }
+    renderCategoryChips();
+    applyFilter();
+
+    // Focus the first newly staged image when we can locate it.
+    let idx = state.filtered.length ? 0 : -1;
+    const first = (res.staged && res.staged[0]) || null;
+    if (first) {
+      const found = state.filtered.findIndex(
+        im => im.location === "staging"
+          && im.category === first.category
+          && im.filename === first.filename,
+      );
+      if (found >= 0) idx = found;
+    }
+    state.currentIdx = idx;
+    renderImageList();
+    if (idx >= 0) await loadAt(idx);
+    else updateButtons();
+
+    const n = res.staged ? res.staged.length : 0;
+    let msg = `staged ${n} image${n === 1 ? "" : "s"}`;
+    if (n < count) {
+      const avail = res.available != null ? res.available : n;
+      msg += ` · only ${avail} eligible in the last 24h`;
+    }
+    if (res.errors && res.errors.length) {
+      msg += ` · ${res.errors.length} failed`;
+    }
+    els.status.textContent = msg;
+  } catch (e) {
+    els.status.textContent = `random stage failed: ${e.message}`;
+  } finally {
+    els.random5Btn.disabled = false;
+  }
+}
+
 // ---------- Wiring ----------
 
 function wireCanvas() {
@@ -758,6 +829,7 @@ function wireTools() {
   els.prevBtn.addEventListener("click", prevImage);
   els.nextBtn.addEventListener("click", nextImage);
   els.hideBoxesBtn.addEventListener("click", () => setHideBoxes(!state.hideBoxes));
+  els.random5Btn.addEventListener("click", () => stageRandom(5));
 
   for (const btn of els.stateChips.querySelectorAll("button[data-state]")) {
     btn.addEventListener("click", () => {

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>belfry · labeler</title>
   <link rel="stylesheet" href="/static/viewer.css?v=24">
-  <script defer src="/static/training.js?v=6"></script>
+  <script defer src="/static/training.js?v=7"></script>
 </head>
 <body class="training-body">
   <header>
@@ -19,6 +19,14 @@
 
   <main class="training-main">
     <aside class="training-rail">
+      <div class="rail-section">
+        <div class="rail-label">Add</div>
+        <button id="random5-btn" class="tool-btn" type="button">Random 5</button>
+        <p class="muted small">
+          Pull 5 random predictions from the last 24h into staging, with
+          their predicted boxes pre-labeled.
+        </p>
+      </div>
       <div class="rail-section">
         <div class="rail-label">Filter</div>
         <div id="category-chips" class="chip-row chip-row-wrap"></div>
