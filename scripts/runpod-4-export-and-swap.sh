@@ -33,8 +33,12 @@ sed -i \
   cameras.yaml
 grep -n "yolo_pt\|yolo_engine" cameras.yaml
 
-# Swap in: start inference back up on the new engine.
-sudo systemctl start belfry-inference.service
+# Swap in: bring inference up on the new engine. `restart` (not `start`) so this
+# can't half-deploy — if the stop above was skipped/failed and the service is
+# still active on the OLD engine, `start`-on-active is a silent no-op and leaves
+# the stale model running; `restart` always cycles it. (Needs `restart` in the
+# NOPASSWD sudoers drop-in — see runme.sh.)
+sudo systemctl restart belfry-inference.service
 sleep 3
 systemctl status belfry-inference.service --no-pager | head -12
 echo
