@@ -27,10 +27,11 @@ android {
 
     defaultConfig {
         applicationId = "io.yellowchicken.belfry"
-        // google_sign_in v7+ uses Android Credential Manager which
-        // requires API 23. Flutter's default minSdk is lower; bump
-        // explicitly so the plugin loads on every device.
-        minSdk = 23
+        // google_sign_in v7+ uses Android Credential Manager (API 23+).
+        // Flutter's default minSdk is now 24, which already clears that bar,
+        // so we track the default rather than hardcoding 23 — that also stops
+        // the Gradle migrator from rewriting this line every build.
+        minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
