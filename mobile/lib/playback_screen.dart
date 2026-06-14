@@ -58,6 +58,10 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
   static const _liveSnapWindow = Duration(seconds: 30);
   VideoPlayerController? _player;
   DateTime? _windowStart;
+  // Drives pinch-to-zoom on the video. Reset to identity whenever new
+  // footage loads (window change / go-live) so a stale zoom doesn't carry
+  // over into an unrelated frame, and on double-tap.
+  final TransformationController _zoomController = TransformationController();
   bool _playerLoading = false;
   String? _playerError;
   bool _userScrubbing = false;
@@ -320,6 +324,7 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
       _windowStart = start;
       _playerLoading = false;
       _playerError = null;
+      _zoomController.value = Matrix4.identity();
       if (mounted) setState(() {});
       if (old != null) {
         old.removeListener(_onPlayerUpdate);
@@ -407,6 +412,7 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
       _windowStart = null;
       _playerLoading = false;
       _isLive = true;
+      _zoomController.value = Matrix4.identity();
       if (mounted) setState(() {});
       if (old != null) {
         old.removeListener(_onPlayerUpdate);
@@ -603,6 +609,7 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
     _stopAllInference();
     _player?.removeListener(_onPlayerUpdate);
     _player?.dispose();
+    _zoomController.dispose();
     super.dispose();
   }
 
@@ -850,9 +857,9 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
     // Android — saw maxImages buffer exhaustion in logcat under that
     // tree shape.
     if (!showOverlay) {
-      return AspectRatio(aspectRatio: ar, child: VideoPlayer(c));
+      return _zoomable(AspectRatio(aspectRatio: ar, child: VideoPlayer(c)));
     }
-    return AspectRatio(
+    return _zoomable(AspectRatio(
       aspectRatio: ar,
       child: Stack(
         fit: StackFit.expand,
@@ -860,6 +867,21 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
           VideoPlayer(c),
           BoxOverlay(detections: _detections),
         ],
+      ),
+    ));
+  }
+
+  // Pinch-to-zoom + pan wrapper for the video. Double-tap snaps back to
+  // 1x. The overlay (when present) lives inside the same AspectRatio so the
+  // detection boxes scale and pan together with the frame.
+  Widget _zoomable(Widget child) {
+    return GestureDetector(
+      onDoubleTap: () => _zoomController.value = Matrix4.identity(),
+      child: InteractiveViewer(
+        transformationController: _zoomController,
+        minScale: 1.0,
+        maxScale: 6.0,
+        child: child,
       ),
     );
   }
