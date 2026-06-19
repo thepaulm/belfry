@@ -21,10 +21,14 @@
     <aside class="training-rail">
       <div class="rail-section">
         <div class="rail-label">Add</div>
+        <select id="random-class" class="tool-select">
+          <option value="">Any class</option>
+        </select>
         <button id="random5-btn" class="tool-btn" type="button">Random 5</button>
         <p class="muted small">
           Pull 5 random predictions from the last 24h into staging, with
-          their predicted boxes pre-labeled.
+          their predicted boxes pre-labeled. Restrict to one class (e.g.
+          <em>person</em>) to mine false positives.
         </p>
       </div>
       <div class="rail-section">

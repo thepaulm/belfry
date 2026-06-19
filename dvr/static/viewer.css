@@ -1169,13 +1169,19 @@ main#events-grid {
 }
 
 .tool-row select,
-#new-box-class {
+#new-box-class,
+#random-class {
   background: #0b0d10;
   color: var(--fg);
   border: 1px solid #2a2f37;
   border-radius: 3px;
   padding: 0.3em 0.5em;
   font-size: 0.85rem;
+}
+
+#random-class {
+  width: 100%;
+  margin-bottom: 0.4em;
 }
 
 .kbd {

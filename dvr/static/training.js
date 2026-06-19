@@ -61,6 +61,7 @@ const els = {
   imageMeta:     document.getElementById("image-meta"),
   hideBoxesBtn:  document.getElementById("hide-boxes-btn"),
   random5Btn:    document.getElementById("random5-btn"),
+  randomClass:   document.getElementById("random-class"),
 };
 
 const state = {
@@ -89,8 +90,10 @@ async function fetchStaging() {
   return r.json();
 }
 
-async function stageRandomBatch(count) {
-  const r = await fetch(`/api/training/stage-random?count=${count}`, {
+async function stageRandomBatch(count, cls) {
+  let url = `/api/training/stage-random?count=${count}`;
+  if (cls) url += `&cls=${encodeURIComponent(cls)}`;
+  const r = await fetch(url, {
     method: "POST",
     credentials: "same-origin",
   });
@@ -609,6 +612,19 @@ function populateClassDropdowns() {
     }
   }
   els.newBoxClass.value = String(state.newBoxClassId);
+
+  // Random-batch class filter: keyed by class *name* (matched server-side
+  // against the stored event class or its alias). Keep the "Any class"
+  // default and preserve the current selection across refreshes.
+  const prev = els.randomClass.value;
+  els.randomClass.innerHTML = '<option value="">Any class</option>';
+  for (const { name } of state.classes) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    els.randomClass.appendChild(opt);
+  }
+  els.randomClass.value = prev;
 }
 
 function updateSelectedUI() {
@@ -745,14 +761,16 @@ function prevImage() {
 // in the list immediately, focused and already labeled with their boxes.
 
 async function stageRandom(count) {
+  const cls = els.randomClass.value || null;
   els.random5Btn.disabled = true;
-  els.status.textContent = `staging ${count} random predictions…`;
+  els.status.textContent =
+    `staging ${count} random ${cls || ""} predictions…`.replace(/  +/g, " ");
   // Don't lose in-flight edits; we're about to replace the whole list.
   if (state.dirty) {
     try { await saveCurrent({ silent: true }); } catch (_) { /* surfaced below */ }
   }
   try {
-    const res = await stageRandomBatch(count);
+    const res = await stageRandomBatch(count, cls);
     const data = await fetchStaging();
     state.classes = data.classes || state.classes;
     state.classNameById = Object.fromEntries(state.classes.map(c => [c.id, c.name]));
@@ -788,7 +806,7 @@ async function stageRandom(count) {
     let msg = `staged ${n} image${n === 1 ? "" : "s"}`;
     if (n < count) {
       const avail = res.available != null ? res.available : n;
-      msg += ` · only ${avail} eligible in the last 24h`;
+      msg += ` · only ${avail} eligible${cls ? ` ${cls}` : ""} in the last 24h`;
     }
     if (res.errors && res.errors.length) {
       msg += ` · ${res.errors.length} failed`;

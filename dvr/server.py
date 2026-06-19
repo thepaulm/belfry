@@ -1340,6 +1340,7 @@ async def api_training_stage_event(event_id: int) -> dict:
 @app.post("/api/training/stage-random")
 async def api_training_stage_random(
     count: int = Query(default=5, ge=1, le=20),
+    cls: str | None = Query(default=None),
 ) -> dict:
     """Stage up to `count` random events from the last 24h into the
     labeler — a quick way to pull in a fresh batch of predictions to
@@ -1347,6 +1348,11 @@ async def api_training_stage_random(
     whose class isn't a fine-tune target (so the random draw never lands
     on something that can't be staged). Each staged image lands with its
     predicted boxes pre-seeded, exactly like the per-event Stage button.
+
+    Pass `cls` to restrict the draw to one class (e.g. `person` to mine
+    false-positive people for hard negatives). Matches either the stored
+    event class or its STAGE_CLASS_FALLBACK alias, so `vehicle`/`car` both
+    land on the merged-vehicle rows.
     """
     conn = _open_events_db()
     if conn is None:
@@ -1377,8 +1383,10 @@ async def api_training_stage_random(
             staged = None
         if _training_status_for(staged, staging_names, promoted_names) != "none":
             continue
-        cls = training.STAGE_CLASS_FALLBACK.get(r["class"], r["class"])
-        if cls not in class_map:
+        resolved = training.STAGE_CLASS_FALLBACK.get(r["class"], r["class"])
+        if resolved not in class_map:
+            continue
+        if cls and cls != r["class"] and cls != resolved:
             continue
         eligible.append(r)
 
@@ -1404,6 +1412,7 @@ async def api_training_stage_random(
 
     return {
         "requested": count,
+        "cls": cls,
         "available": len(eligible),
         "staged": staged_out,
         "errors": errors,
