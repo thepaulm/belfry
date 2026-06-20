@@ -102,6 +102,18 @@ for k in sys.argv[1].lstrip(".").split("."):
 print("" if d is None else d)
 ' "$1"; }
 
+# Remaining RunPod credit in USD, formatted to cents. Best-effort: a failed
+# API call / parse prints "?" rather than tripping set -e.
+runpod_balance() {
+  local raw b
+  raw="$(runpodctl user -o json 2>/dev/null | jget .clientBalance 2>/dev/null || true)"
+  if [ -n "$raw" ]; then
+    b="$(printf '%.2f' "$raw" 2>/dev/null || true)"
+    [ -n "$b" ] && { echo "$b"; return 0; }
+  fi
+  echo "?"
+}
+
 # RunPod GraphQL — the only reliable source for the proxy SSH username and pod
 # readiness (runpodctl's ssh-info/uptime telemetry is broken on secure cloud).
 RUNPOD_KEY="${RUNPOD_API_KEY:-$(python3 -c "import re; m=re.search(r\"apikey\\s*=\\s*'([^']+)'\", open('$HOME/.runpod/config.toml').read()); print(m.group(1) if m else '')" 2>/dev/null)}"
@@ -130,6 +142,7 @@ print(f'{host}\t{ready}')
 # phone notification with the outcome. Guards on POD_ID / SSH_READY so it's safe
 # whether we die in preflight or mid-train.
 POD_ID=""; STAGE=""; TAR=""; SSH_READY=0; DONE_OK=0
+START_BALANCE=""; END_BALANCE=""   # RunPod credit snapshots (USD), filled below
 cleanup() {
   local rc=$?
   rm -rf "$STAGE" "$TAR" 2>/dev/null || true
@@ -147,7 +160,11 @@ cleanup() {
     fi
   fi
   if [ "$DONE_OK" = 1 ]; then
-    notify "✅ ${VERSION} trained & deployed"
+    if [ -n "$END_BALANCE" ] && [ "$END_BALANCE" != "?" ]; then
+      notify "✅ ${VERSION} trained & deployed — RunPod credit \$$END_BALANCE left"
+    else
+      notify "✅ ${VERSION} trained & deployed"
+    fi
   else
     notify "❌ ${VERSION} retrain FAILED (rc=$rc) — see last-retrain.log"
   fi
@@ -162,6 +179,9 @@ command -v curl >/dev/null || die "curl not installed (needed for the GraphQL AP
 [ -f "$REPO/yolo11l-headext.pt" ] || die "missing yolo11l-headext.pt (run scripts/extend-head.py)"
 [ -d "$HOME/belfry-training/images" ] || die "no training images at ~/belfry-training/images"
 [ -f "$SSH_KEY" ] || die "no SSH key at $SSH_KEY — ssh-keygen one and 'runpodctl ssh add-key'"
+
+START_BALANCE="$(runpod_balance)"
+log "RunPod credit at start: \$$START_BALANCE"
 
 if [ "$NO_SPLIT" = 0 ]; then
   log "regenerating train/val split"
@@ -352,3 +372,13 @@ fi
 
 DONE_OK=1   # cleanup will push a success notification
 log "ALL DONE — belfry-${VERSION} trained, pulled, and (unless --no-swap) live"
+
+# Pod is already gone (deleted before the TRT export above), so this reflects
+# the full charge for the run.
+END_BALANCE="$(runpod_balance)"
+if [ "$START_BALANCE" != "?" ] && [ "$END_BALANCE" != "?" ]; then
+  SPENT="$(python3 -c "print(f'{${START_BALANCE}-${END_BALANCE}:.2f}')" 2>/dev/null || echo '?')"
+  log "RunPod credit: \$$START_BALANCE → \$$END_BALANCE  (this run ≈ \$$SPENT)"
+else
+  log "RunPod credit at end: \$$END_BALANCE"
+fi
