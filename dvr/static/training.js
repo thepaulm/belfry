@@ -82,6 +82,12 @@ const state = {
   drag: null,            // {mode: "draw"|"move"|"resize", ...}
 };
 
+// Digit-key buffer for selecting the new-box class by its (sparse,
+// COCO-aligned) class id. Single-digit ids (0/2/7) commit on keypress;
+// multi-digit ids (14, 80, …) accumulate and commit on the disambiguating
+// keypress or after a short pause.
+const clsKeys = { buffer: "", timer: null };
+
 // ---------- API ----------
 
 async function fetchStaging() {
@@ -859,12 +865,75 @@ function wireTools() {
   }
 }
 
+// ---------- New-box class hotkeys ----------
+
+function setNewBoxClassById(id) {
+  if (!state.classes.some(c => c.id === id)) return false;
+  state.newBoxClassId = id;
+  els.newBoxClass.value = String(id);
+  // The in-flight draw rectangle is tinted by the new-box class.
+  if (state.drag && state.drag.mode === "draw") drawCanvas();
+  els.status.textContent = `new-box class → ${id}: ${classNameOf(id)}`;
+  return true;
+}
+
+// Is `buf` an exact class id, and/or a strict prefix of a longer one?
+function classBufStatus(buf) {
+  const ids = state.classes.map(c => c.id);
+  const n = parseInt(buf, 10);
+  return {
+    exact: ids.includes(n),
+    longer: ids.some(id => {
+      const s = String(id);
+      return s.startsWith(buf) && s.length > buf.length;
+    }),
+  };
+}
+
+function pendClass(buf) {
+  clsKeys.buffer = buf;
+  els.status.textContent = `new-box class… ${buf}`;
+  clsKeys.timer = setTimeout(() => {
+    const b = clsKeys.buffer;
+    clsKeys.buffer = "";
+    if (classBufStatus(b).exact) setNewBoxClassById(parseInt(b, 10));
+    else els.status.textContent = "";
+  }, 800);
+}
+
+function handleClassDigit(d) {
+  clearTimeout(clsKeys.timer);
+  let buf = clsKeys.buffer + d;
+  let st = classBufStatus(buf);
+  // Buffer + digit leads nowhere — restart from this digit alone.
+  if (!st.exact && !st.longer) {
+    buf = d;
+    st = classBufStatus(buf);
+  }
+  if (st.exact && !st.longer) {      // unambiguous → commit now
+    clsKeys.buffer = "";
+    setNewBoxClassById(parseInt(buf, 10));
+  } else if (st.exact || st.longer) { // could grow into a longer id → wait
+    pendClass(buf);
+  } else {                            // no class starts with this digit
+    clsKeys.buffer = "";
+    els.status.textContent = `no class ${d}`;
+  }
+}
+
 function wireKeyboard() {
   window.addEventListener("keydown", (e) => {
     // Don't fight typing in selects.
     const tag = e.target && e.target.tagName;
     if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+    // Digit keys pick the new-box class by id (e.g. 8→0 = deer, 2 = car).
+    if (/^[0-9]$/.test(e.key)) {
+      e.preventDefault();
+      handleClassDigit(e.key);
+      return;
+    }
 
     switch (e.key) {
       case "j": case "ArrowDown": case "ArrowRight":
