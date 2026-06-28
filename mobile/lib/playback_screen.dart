@@ -69,6 +69,18 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
   int _loadGen = 0;
   Timer? _liveTick;
 
+  // iOS AVPlayer stall recovery. On a buffer underrun (common when watching
+  // remotely through the Orin's residential upload) AVPlayer silently stops
+  // advancing and does NOT resume on its own even after the buffer refills —
+  // the frame and timeline freeze forever. Android's ExoPlayer rebuffers and
+  // resumes by itself, so this is iOS-only. video_player's `isPlaying` is
+  // intent-based (set by play()/pause()), not the real player rate, so a stall
+  // leaves isPlaying==true while `position` stops moving. This watchdog detects
+  // that and re-issues play() to kick the rate back to 1.
+  Timer? _stallWatchdog;
+  Duration _lastWatchPos = Duration.zero;
+  int _stallTicks = 0;
+
   // Inference overlay. _inferenceLive handles live mode (continuous SSE),
   // _inferencePast handles past-mode re-inference (one-shot SSE per window
   // with ts→frame lookup). Only one is active at a time.
@@ -105,6 +117,8 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
           DateTime.now().difference(_today).inSeconds.toDouble().clamp(0.0, 86399.0);
     }
     _viewStartSec = _snappedStart(_sliderSec);
+    _stallWatchdog =
+        Timer.periodic(const Duration(seconds: 1), (_) => _checkStall());
     _refreshDayEvents();
     if (initial != null) {
       // Deep-link (alert/event tap): the availability ranges must be
@@ -300,9 +314,10 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
   // `seekToSec` (sec-of-day) is where playback should land inside the loaded
   // window; defaults to the window start. Deep-links pass a later target so
   // the window can begin earlier (off the live edge) yet play from the event.
-  Future<void> _loadWindowAt(double sliderSec, {double? seekToSec}) async {
+  Future<void> _loadWindowAt(double sliderSec,
+      {double? seekToSec, bool force = false}) async {
     debugPrint(
-      '[belfry][pb:${widget.cameraName}] loadWindowAt sliderSec=${sliderSec.toStringAsFixed(1)}',
+      '[belfry][pb:${widget.cameraName}] loadWindowAt sliderSec=${sliderSec.toStringAsFixed(1)} force=$force',
     );
     final start = _absoluteTime(sliderSec);
     final seekTarget = _absoluteTime(seekToSec ?? sliderSec);
@@ -321,7 +336,11 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
 
     final cur = _player;
     final wStart = _windowStart;
-    if (!_isLive &&
+    // Fast path: target lands inside the already-loaded window — just seek.
+    // Skipped when `force` (stall recovery) so we rebuild the controller and
+    // get a fresh connection instead of reusing the wedged one.
+    if (!force &&
+        !_isLive &&
         cur != null &&
         cur.value.isInitialized &&
         wStart != null &&
@@ -523,6 +542,77 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
     });
   }
 
+  // Runs once a second. Detects an iOS AVPlayer playback stall — we intend to
+  // be playing and the clip hasn't ended, yet the playhead hasn't advanced —
+  // and escalates recovery (see the body): a light play() nudge for a rate
+  // stall, then a full controller rebuild for a wedged buffering stall, which
+  // is the observed iOS-over-tunnel failure (buffering=true forever after a
+  // couple seconds). Android/web recover on their own; iOS AVPlayer does not.
+  void _checkStall() {
+    final c = _player;
+    if (c == null || !c.value.isInitialized) return;
+    final pos = c.value.position;
+    final dur = c.value.duration;
+    // Conditions where a frozen playhead is expected/not ours to fix: errored,
+    // user scrubbing, mid-load (a rebuild is already in flight), paused by
+    // intent (there is no pause control today, but be safe), live mode, or the
+    // clip reached its end.
+    final atEnd =
+        dur > Duration.zero && pos >= dur - const Duration(milliseconds: 400);
+    if (c.value.hasError ||
+        _userScrubbing ||
+        _playerLoading ||
+        _isLive ||
+        !c.value.isPlaying ||
+        atEnd) {
+      _lastWatchPos = pos;
+      _stallTicks = 0;
+      return;
+    }
+    // Playhead advanced — healthy.
+    if (pos != _lastWatchPos) {
+      _lastWatchPos = pos;
+      _stallTicks = 0;
+      return;
+    }
+    // Frozen while we intend to play. Only act once playback has actually
+    // started (pos > 0) so we never fight the normal initial buffer at load.
+    if (pos <= Duration.zero) {
+      _lastWatchPos = pos;
+      return;
+    }
+    _stallTicks++;
+    // Escalating recovery. A rate-stall (AVPlayer paused itself but the buffer
+    // is fine) is cured by re-applying play(). A buffering stall — AVPlayer
+    // wedged on a connection that stopped delivering bytes, the observed
+    // iOS-over-tunnel failure — never recovers on its own, so we rebuild the
+    // controller at the current position to force a fresh connection (Android's
+    // ExoPlayer and the browser effectively do this themselves).
+    if (_stallTicks == 3 && !c.value.isBuffering) {
+      debugPrint('[belfry][pb:${widget.cameraName}] rate-stall — nudging play()');
+      c.play();
+    } else if (_stallTicks >= 6) {
+      debugPrint(
+        '[belfry][pb:${widget.cameraName}] buffering stall — rebuilding player at $pos',
+      );
+      _stallTicks = 0;
+      _reloadForStall(pos);
+    }
+    _lastWatchPos = pos;
+  }
+
+  // Rebuild the player for the current window, resuming at `resumeInto` (the
+  // offset into the window where it wedged). force:true makes _loadWindowAt
+  // tear down and recreate the controller instead of reusing the stuck one.
+  void _reloadForStall(Duration resumeInto) {
+    final wStart = _windowStart;
+    if (wStart == null) return;
+    final resumeAbs = wStart.add(resumeInto);
+    final resumeSec =
+        resumeAbs.difference(_selectedDay).inMilliseconds / 1000.0;
+    unawaited(_loadWindowAt(resumeSec, seekToSec: resumeSec, force: true));
+  }
+
   void _selectDay(DateTime d) {
     if (d.isAtSameMomentAs(_selectedDay)) return;
     setState(() {
@@ -652,6 +742,7 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
   @override
   void dispose() {
     _liveTick?.cancel();
+    _stallWatchdog?.cancel();
     _stopAllInference();
     _player?.removeListener(_onPlayerUpdate);
     _player?.dispose();
