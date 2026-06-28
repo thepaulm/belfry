@@ -73,6 +73,9 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
   // _inferencePast handles past-mode re-inference (one-shot SSE per window
   // with ts→frame lookup). Only one is active at a time.
   bool _labelsOn = false;
+  // How far before an event/alert moment a deep-link lands, so labels can
+  // connect and draw boxes before the subject enters the frame.
+  static const Duration _deepLinkLeadIn = Duration(seconds: 7);
   InferenceLiveClient? _inferenceLive;
   StreamSubscription<List<Detection>>? _inferenceLiveSub;
   InferencePlaybackClient? _inferencePast;
@@ -84,10 +87,18 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
     super.initState();
     final initial = widget.initialTs;
     if (initial != null) {
-      final local = initial.toLocal();
+      // Deep-link from an event/alert tap: back up a few seconds before the
+      // moment so the label overlay has time to connect and start drawing
+      // boxes before the subject actually enters the frame.
+      final local = initial.toLocal().subtract(_deepLinkLeadIn);
       _selectedDay = _localStartOfDay(local);
       _sliderSec =
           local.difference(_selectedDay).inSeconds.toDouble().clamp(0.0, 86399.0);
+      // Start with labels on so the user immediately sees what was detected.
+      _labelsOn = true;
+      // Land zoomed to the 5-min window so the event is easy to scrub around,
+      // instead of a thumb lost across the full-day timeline.
+      _viewScale = '5min';
     } else {
       _selectedDay = _today;
       _sliderSec =
@@ -109,7 +120,35 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
   Future<void> _loadListThenWindow(double sliderSec) async {
     await _loadList();
     if (!mounted) return;
-    await _loadWindowAt(sliderSec);
+    await _loadWindowContaining(sliderSec);
+  }
+
+  // Load a past window that *contains* `targetSec` and seek playback to it.
+  // Used by deep-links (event/alert tap). A plain _loadWindowAt(targetSec)
+  // would, for a moment within ~5 min of live, see the 5-min window overrun
+  // the live edge and snap to the live stream — stranding the user at live
+  // instead of on the event. Here we slide the window start back far enough
+  // that the whole window sits before live, then seek to the target inside it.
+  Future<void> _loadWindowContaining(double targetSec) async {
+    final live = _liveEdgeOfSelectedDay();
+    if (live == null) {
+      // Selected day isn't today — no live edge to collide with.
+      await _loadWindowAt(targetSec, seekToSec: targetSec);
+      return;
+    }
+    // Within the live-snap window of the edge the live stream already shows
+    // this moment (and the footage may not be on disk yet) — just go live.
+    if (targetSec >= live - _liveSnapWindow.inSeconds) {
+      await _enterLive();
+      return;
+    }
+    // Latest window start that keeps the whole window off the live edge, so
+    // _loadWindowAt's own live-snap guard doesn't fire and bounce us to live.
+    final latestStart =
+        (live - _windowDuration.inSeconds - _liveSnapWindow.inSeconds)
+            .clamp(0.0, 86399.0);
+    final startSec = targetSec.clamp(0.0, latestStart);
+    await _loadWindowAt(startSec, seekToSec: targetSec);
   }
 
   double _snappedStart(double sec) {
@@ -258,11 +297,15 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
     return false;
   }
 
-  Future<void> _loadWindowAt(double sliderSec) async {
+  // `seekToSec` (sec-of-day) is where playback should land inside the loaded
+  // window; defaults to the window start. Deep-links pass a later target so
+  // the window can begin earlier (off the live edge) yet play from the event.
+  Future<void> _loadWindowAt(double sliderSec, {double? seekToSec}) async {
     debugPrint(
       '[belfry][pb:${widget.cameraName}] loadWindowAt sliderSec=${sliderSec.toStringAsFixed(1)}',
     );
     final start = _absoluteTime(sliderSec);
+    final seekTarget = _absoluteTime(seekToSec ?? sliderSec);
     final now = DateTime.now();
 
     if (start.add(_windowDuration).isAfter(now.subtract(_liveSnapWindow))) {
@@ -284,7 +327,7 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
         wStart != null &&
         !start.isBefore(wStart) &&
         start.isBefore(wStart.add(_windowDuration))) {
-      await cur.seekTo(start.difference(wStart));
+      await cur.seekTo(seekTarget.difference(wStart));
       await cur.play();
       return;
     }
@@ -316,6 +359,9 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
         return;
       }
       await c.setLooping(false);
+      if (seekToSec != null) {
+        await c.seekTo(seekTarget.difference(start));
+      }
       await c.play();
       c.addListener(_onPlayerUpdate);
 
