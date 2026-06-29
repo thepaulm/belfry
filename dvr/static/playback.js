@@ -763,6 +763,25 @@ function onScrub() {
   updateCursor();
 }
 
+// How far before an event/alert moment a deep-link lands. Backing the
+// timeline up a few seconds gives the label overlay time to connect and
+// start drawing boxes before the subject actually enters the frame.
+const DEEP_LINK_LEAD_IN_S = 7;
+
+function openDeepLink(ts) {
+  // Deep-link from an event/alert tap (?ts=<unix>). Mirror the mobile
+  // app: land zoomed to the 5-min window with labels already on, and
+  // back the playback start up a few seconds before the moment so the
+  // box overlay is live before the subject enters the frame. Set the
+  // scale + label state *before* seekToTimestamp so the view snaps to
+  // the right 5-min slice and the overlay (created during loadWindow)
+  // self-gates itself on when subscribePast runs.
+  viewScale = "5min";
+  updateScaleButtons();
+  if (window.setLabels) window.setLabels(true);
+  seekToTimestamp(ts - DEEP_LINK_LEAD_IN_S);
+}
+
 function seekToTimestamp(ts) {
   // Move the day picker to ts's local day, snap the visible window to
   // contain ts, then put the scrubber there and load. Used when the
@@ -1036,7 +1055,7 @@ function init() {
   }
   const tsParam = parseFloat(qp.get("ts"));
   if (Number.isFinite(tsParam) && tsParam > 0) {
-    seekToTimestamp(tsParam);
+    openDeepLink(tsParam);
   } else {
     goLive();
   }

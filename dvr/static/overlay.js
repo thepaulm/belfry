@@ -336,6 +336,23 @@ function setAllOverlays(on) {
   }
 }
 
+// Flip the "Show labels" state programmatically: sync the body class +
+// toggle button, then fan start/stop out to the overlays. Used both by
+// the toggle's click handler and by playback.js's deep-link open, which
+// wants labels on the moment a user lands on an event/alert. Overlays
+// created *after* this runs self-gate on the body class (see
+// subscribePast / subscribeLive), so calling it before the overlay
+// exists still leaves labels-on once the overlay attaches.
+function setLabels(on) {
+  document.body.classList.toggle("labels-on", on);
+  const btn = document.getElementById("labels-toggle");
+  if (btn) {
+    btn.setAttribute("aria-pressed", String(on));
+    btn.classList.toggle("active", on);
+  }
+  setAllOverlays(on);
+}
+
 // "Show labels" toggle wiring shared across pages. Each session starts
 // labels-OFF regardless of localStorage — the auto-restart-from-storage
 // path repeatedly raced HLS for connection slots on page load. The
@@ -348,17 +365,14 @@ function wireLabelsToggle() {
   btn.setAttribute("aria-pressed", "false");
   btn.classList.remove("active");
   btn.addEventListener("click", () => {
-    const on = !document.body.classList.contains("labels-on");
-    document.body.classList.toggle("labels-on", on);
-    btn.setAttribute("aria-pressed", String(on));
-    btn.classList.toggle("active", on);
-    setAllOverlays(on);
+    setLabels(!document.body.classList.contains("labels-on"));
   });
 }
 
 // Expose to non-module callers (viewer.js / playback.js).
 window.BoxOverlay = BoxOverlay;
 window.wireLabelsToggle = wireLabelsToggle;
+window.setLabels = setLabels;
 // Auto-wire on DOMContentLoaded so each page just needs to include
 // overlay.js and have a #labels-toggle button.
 if (document.readyState === "loading") {
