@@ -988,6 +988,18 @@ function init() {
     if (userScrubbing) return;
     if (pastLoadStartOffsetSec === null) return;
     const newOffset = pastLoadStartOffsetSec + Math.floor(player.currentTime);
+    // At Hour / 5-min scale the visible slice can be narrower than (or
+    // offset from) the 5-min mp4 window — a deep-link in particular lands
+    // mid-slice — so playback runs off the slice's right edge. Slide the
+    // visible window forward to the slice containing the play head;
+    // otherwise the cursor parks at the boundary while the video keeps
+    // playing past it.
+    const live = liveEdgeOfSelectedDay();
+    const dayMax = live !== null ? live : 86399;
+    if (viewScale !== "day" && newOffset > scrubMaxSec() && newOffset <= dayMax) {
+      viewStartSec = snapToScale(newOffset);
+      rerenderTimeline();
+    }
     const clamped = Math.min(Math.max(newOffset, scrubMinSec()), scrubMaxSec());
     if (clamped !== parseInt(scrubber.value, 10)) {
       scrubber.value = String(clamped);
