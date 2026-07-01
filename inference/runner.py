@@ -17,9 +17,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import sys
 import threading
+import time
 from pathlib import Path
 
 import uvicorn
@@ -36,6 +38,42 @@ logger = logging.getLogger("belfry.inference.runner")
 
 _LIVE_HOST = "127.0.0.1"
 _LIVE_PORT = 9091
+
+# Watchdog: if a recorder that was healthy produces no frames for this
+# long, its drain thread is almost certainly wedged inside cv2's blocking
+# VideoCapture open (a known failure after a MediaMTX blip 404-storms the
+# loopback paths — see recorder._open_capture). Such a thread stays
+# is_alive() == True, so the "all threads died" check below can't catch it.
+# A wedged C call can't be interrupted from Python, so recovery is to exit
+# the process and let systemd (Restart=on-failure) rebuild every capture.
+# 120 s comfortably clears legitimate reopen gaps (~2–7 s) while bounding an
+# outage to ~2 min instead of the ~28 h a silent wedge cost on 2026-06-30.
+_WATCHDOG_STALL_S = 120.0
+_WATCHDOG_INTERVAL_S = 20.0
+
+
+def _watchdog(recorders: "list[EventRecorder]", stop: threading.Event) -> None:
+    """Force a process exit if any healthy recorder goes frame-silent."""
+    while not stop.wait(_WATCHDOG_INTERVAL_S):
+        now = time.monotonic()
+        stale = []
+        for rec in recorders:
+            age = rec.frames_stalled_for(now)
+            if age is not None and age > _WATCHDOG_STALL_S:
+                stale.append((rec.camera_name, age))
+        if stale:
+            for name, age in stale:
+                logger.error(
+                    "watchdog: %s produced no frames for %.0fs (drain likely "
+                    "wedged in cv2 open)", name, age,
+                )
+            logger.error(
+                "watchdog: %d camera(s) frame-silent; exiting so systemd "
+                "restarts and rebuilds all captures", len(stale),
+            )
+            # os._exit, not sys.exit: a wedged drain thread is non-daemon and
+            # stuck in C, so a normal interpreter shutdown would hang on join.
+            os._exit(1)
 
 
 def _run_uvicorn(stop: threading.Event) -> None:
@@ -133,6 +171,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _on_signal)
 
     threads: list[threading.Thread] = []
+    recorders: list[EventRecorder] = []
     # SSE server thread first — recorders publish to a broadcaster that's
     # only useful once the loop exists. publish_threadsafe no-ops while
     # the loop reference is None, so any race here is benign.
@@ -182,7 +221,13 @@ def main() -> int:
         )
         t.start()
         threads.append(t)
+        recorders.append(recorder)
         logger.info("started recorder thread for %s", cam.name)
+
+    watchdog_thread = threading.Thread(
+        target=_watchdog, args=(recorders, stop), name="watchdog", daemon=True,
+    )
+    watchdog_thread.start()
 
     logger.info("running %d recorder thread(s); waiting for signal", len(threads))
     # Wait on the stop event so the main thread doesn't busy-spin and

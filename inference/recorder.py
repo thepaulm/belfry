@@ -172,6 +172,14 @@ class EventRecorder:
         self._latest_lock = threading.Lock()
         self._cap = None
         self._drain_stop = threading.Event()
+        # Wall-monotonic timestamp of the last frame the drain thread
+        # successfully read; None until the first frame arrives. The
+        # runner's watchdog reads this to catch a drain wedged inside
+        # cv2's blocking VideoCapture open (see _open_capture) — that
+        # leaves the thread alive but frame-starved, so is_alive() can't
+        # detect it. Plain float assignment is atomic in CPython, so no
+        # lock is needed for the watchdog's cross-thread read.
+        self._last_frame_monotonic: float | None = None
 
     # ------------------------------------------------------------------
     # main loop
@@ -226,6 +234,21 @@ class EventRecorder:
         logger.info("opened %s for camera %s", self.rtsp_url, self.camera_name)
         return cap
 
+    def frames_stalled_for(self, now_monotonic: float | None = None) -> float | None:
+        """Seconds since the drain thread last read a frame, or None if it
+        has never read one (startup, or a camera that never comes up).
+
+        The runner watchdog uses this to catch a drain wedged inside cv2's
+        blocking open call. Returning None for the never-produced-a-frame
+        case deliberately excludes a permanently-down camera from the
+        watchdog, so a single misconfigured feed can't crash-loop the whole
+        service — only a camera that was healthy and then went silent trips it.
+        """
+        last = self._last_frame_monotonic
+        if last is None:
+            return None
+        return (now_monotonic if now_monotonic is not None else time.monotonic()) - last
+
     # ------------------------------------------------------------------
     # drain thread — reads at native fps, keeps latest frame only.
     # Decouples socket consumption from inference cadence so the H.264
@@ -260,6 +283,7 @@ class EventRecorder:
                     continue
                 with self._latest_lock:
                     self._latest = (frame, time.time())
+                self._last_frame_monotonic = time.monotonic()
             except Exception:
                 logger.exception("drain: unexpected error on %s; will retry", self.camera_name)
                 self._cap = None
