@@ -369,6 +369,10 @@ async function loadAt(idx) {
   try {
     const text = await fetchLabel(im);
     state.boxes = parseYolo(text);
+    // Select the first box by default so correcting/deleting a label is a
+    // single keystroke (Tab cycles to the others) rather than a mouse hunt.
+    state.selectedBox = state.boxes.length ? 0 : -1;
+    updateSelectedUI();
     drawCanvas();
   } catch (e) {
     els.status.textContent = `label fetch failed: ${e.message}`;
@@ -673,6 +677,19 @@ function updateButtons() {
   els.counts.textContent = counts + dirty;
 }
 
+// Cycle the selection through the current image's boxes (Tab / Shift+Tab).
+// Wraps around; no-op when there are no boxes.
+function cycleSelectedBox(dir) {
+  const n = state.boxes.length;
+  if (!n) return;
+  const cur = state.selectedBox;
+  state.selectedBox = cur < 0
+    ? (dir < 0 ? n - 1 : 0)
+    : (cur + dir + n) % n;
+  updateSelectedUI();
+  drawCanvas();
+}
+
 function deleteSelectedBox() {
   if (state.selectedBox < 0) return;
   state.boxes.splice(state.selectedBox, 1);
@@ -932,6 +949,14 @@ function wireKeyboard() {
     if (/^[0-9]$/.test(e.key)) {
       e.preventDefault();
       handleClassDigit(e.key);
+      return;
+    }
+
+    // Tab cycles the selected box (Shift+Tab goes backward) so fixing or
+    // deleting a label is keyboard-only.
+    if (e.key === "Tab") {
+      e.preventDefault();
+      cycleSelectedBox(e.shiftKey ? -1 : 1);
       return;
     }
 
