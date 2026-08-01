@@ -233,11 +233,13 @@ def main() -> int:
     # Wait on the stop event so the main thread doesn't busy-spin and
     # SIGTERM is delivered promptly. Re-check thread liveness so we
     # exit if every recorder dies (e.g. all RTSP feeds permanently fail).
+    all_died = False
     while not stop.is_set():
         stop.wait(timeout=10.0)
         alive = [t for t in threads if t.is_alive()]
         if not alive:
             logger.error("all recorder threads died; exiting")
+            all_died = True
             break
 
     logger.info("waiting for recorders to flush and join")
@@ -247,7 +249,14 @@ def main() -> int:
             logger.warning("thread %s did not join within 30s", t.name)
     notifier.stop()
     logger.info("all recorders stopped")
-    return 0
+    # Exit non-zero when we bailed because every recorder died (rather than on a
+    # clean SIGTERM). A status-0 exit reads as success to systemd, so
+    # Restart=on-failure would NOT rebuild the service — which is exactly how a
+    # boot-race (inference opens the loopback RTSP before MediaMTX has published
+    # the paths → all recorders 404 → all threads die) left detection silently
+    # dead for 3 days (2026-07-28). Non-zero lets systemd restart us, by which
+    # point MediaMTX is up.
+    return 1 if all_died else 0
 
 
 if __name__ == "__main__":
