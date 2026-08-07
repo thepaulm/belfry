@@ -941,7 +941,12 @@ async def api_training_staging() -> dict:
 
     Each item has a `location` field — `"staging"` (workbench, in
     staging/<category>/) or `"promoted"` (training set, in images/+
-    labels/) — so the frontend can hit the right CRUD route.
+    labels/) — so the frontend can hit the right CRUD route, plus a
+    `classes` list of the class ids actually present in its label file.
+    `classes` is what the label filter keys on: the staging category is
+    only a class *hint* from the capture flow, and promoted items have
+    no category at all, so folder name is useless for "show me every
+    image with a raccoon box".
     """
     training.ensure_dataset_yaml()
     _, id_to_name = training.load_class_map()
@@ -956,11 +961,13 @@ async def api_training_staging() -> dict:
                 continue
             for img in sorted(cat_dir.glob("*.jpg")):
                 cam, ts = _parse_capture_filename(img.name)
+                label_path = img.with_suffix(".txt")
                 items.append({
                     "location": "staging",
                     "category": cat_dir.name,
                     "filename": img.name,
-                    "has_label": img.with_suffix(".txt").exists(),
+                    "has_label": label_path.exists(),
+                    "classes": training.label_class_ids(label_path),
                     "cam": cam,
                     "ts": ts,
                 })
@@ -975,6 +982,7 @@ async def api_training_staging() -> dict:
                 "category": None,
                 "filename": img.name,
                 "has_label": label_path.is_file(),
+                "classes": training.label_class_ids(label_path),
                 "cam": cam,
                 "ts": ts,
             })

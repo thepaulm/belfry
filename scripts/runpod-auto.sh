@@ -38,13 +38,16 @@ REPO="$PWD"
 source scripts/runpod-version
 
 # ---- tunables -------------------------------------------------------------
-# RTX PRO 6000 (Blackwell, 96GB) ~halves wall-clock vs a 4090 at ~2x/hr — a
-# cost wash, and the result lands sooner. Needs the cuda12.8+ image below
-# (Blackwell sm_120). Override per-run with BELFRY_GPU_ID; `runpodctl gpu list
-# -o json` shows the exact gpuId strings (pass the long "NVIDIA ..." gpuId,
-# NOT the short displayName). train-on-pod batch=32 still fits a 24GB 4090 if
-# you fall back; bump batch to actually use the PRO 6000's VRAM.
-GPU_ID="${BELFRY_GPU_ID:-NVIDIA RTX PRO 6000 Blackwell Server Edition}"
+# A40 (Ampere, 48GB) is the default: ~$0.47/run vs a Blackwell PRO 6000's few
+# dollars, slower wall-clock but we don't care about turnaround for overnight
+# retrains — and the PRO 6000 is frequently out of secure-cloud capacity, so
+# it forced this fallback most runs anyway. batch=32 fits the A40's 48GB with
+# room to spare. Override per-run with BELFRY_GPU_ID (e.g. the Blackwell string
+# when you want it fast); `runpodctl gpu list -o json` shows the exact gpuId
+# strings (pass the long "NVIDIA ..." gpuId, NOT the short displayName). The
+# cuda12.8 POD_IMAGE below is backward-compatible with the A40's sm_86 and is
+# still what the Blackwell (sm_120) needs, so it stays as-is either way.
+GPU_ID="${BELFRY_GPU_ID:-NVIDIA A40}"
 # A CUDA+torch image; train-on-pod.sh pip-installs ultralytics on top.
 POD_IMAGE="${BELFRY_POD_IMAGE:-runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04}"
 CONTAINER_DISK_GB="${BELFRY_POD_DISK_GB:-40}"        # torch image + dataset + run dir

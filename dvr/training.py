@@ -164,6 +164,31 @@ def bbox_to_yolo_line(bbox: list[float], cls_id: int) -> str:
     return f"{cls_id} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}"
 
 
+def label_class_ids(label_path: Path) -> list[int]:
+    """Return the sorted distinct class ids present in a YOLO label file.
+
+    Empty list for a missing file *and* for an empty one — the caller
+    already distinguishes those two states via the file's existence
+    (empty .txt is the hard-negative sentinel, missing is unlabeled),
+    so this only reports content. Unparseable lines are skipped rather
+    than raising: a hand-edited label file shouldn't 500 the listing.
+    """
+    try:
+        text = label_path.read_text()
+    except OSError:
+        return []
+    ids: set[int] = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ids.add(int(line.split()[0]))
+        except (ValueError, IndexError):
+            continue
+    return sorted(ids)
+
+
 def seed_labels_for_capture(
     db_path: Path, cam: str, ts: float, class_map: dict[str, int]
 ) -> list[str]:

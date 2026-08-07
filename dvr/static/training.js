@@ -62,6 +62,7 @@ const els = {
   hideBoxesBtn:  document.getElementById("hide-boxes-btn"),
   random5Btn:    document.getElementById("random5-btn"),
   randomClass:   document.getElementById("random-class"),
+  labelClass:    document.getElementById("label-class-filter"),
 };
 
 const state = {
@@ -69,7 +70,7 @@ const state = {
   // Array index ≠ class id, so always read .id / .name explicitly.
   classes: [],
   classNameById: {},     // {0: "person", 2: "car", …} — fast lookup in draw()
-  allImages: [],         // [{location, category, filename, has_label, cam, ts}]
+  allImages: [],         // [{location, category, filename, has_label, classes, cam, ts}]
   filtered: [],          // current filter result
   currentIdx: -1,        // index into filtered
   boxes: [],             // current image's boxes; normalized
@@ -77,7 +78,8 @@ const state = {
   hideBoxes: false,      // view-only peek: hide boxes + pause editing
   dirty: false,
   newBoxClassId: 0,      // real class id, not an array index
-  filter: { categories: new Set(), state: "all" },  // empty cats = all
+  // empty cats = all; labelClassId null = any label
+  filter: { categories: new Set(), state: "all", labelClassId: null },
   // Pointer interaction
   drag: null,            // {mode: "draw"|"move"|"resize", ...}
 };
@@ -204,20 +206,35 @@ function serializeYolo(boxes) {
 
 // ---------- Filter / list rendering ----------
 
-function applyFilter() {
+// Everything except the label-class filter. Split out so the label
+// dropdown can show counts faceted by the *other* active filters —
+// narrowing to Promoted should make its numbers say how many promoted
+// raccoons there are, not how many exist overall.
+function matchesNonLabelFilters(im) {
   const { categories, state: stateFilter } = state.filter;
+  // Category chips only act on staging items (promoted has no
+  // category). When a category is selected, we hide promoted.
+  if (categories.size) {
+    if (im.location !== "staging") return false;
+    if (!categories.has(im.category)) return false;
+  }
+  if (stateFilter === "promoted") return im.location === "promoted";
+  if (stateFilter === "unlabeled") return im.location === "staging" && !im.has_label;
+  if (stateFilter === "labeled") return im.location === "staging" && im.has_label;
+  // "all" — show everything (staging + promoted)
+  return true;
+}
+
+function applyFilter() {
+  const { labelClassId } = state.filter;
   state.filtered = state.allImages.filter(im => {
-    // Category chips only act on staging items (promoted has no
-    // category). When a category is selected, we hide promoted.
-    if (categories.size) {
-      if (im.location !== "staging") return false;
-      if (!categories.has(im.category)) return false;
+    // Label filter keys on the boxes actually in the .txt, so it spans
+    // staging + promoted alike. Unlabeled images have no classes and
+    // are correctly excluded — there's nothing to audit in them.
+    if (labelClassId !== null && !(im.classes || []).includes(labelClassId)) {
+      return false;
     }
-    if (stateFilter === "promoted") return im.location === "promoted";
-    if (stateFilter === "unlabeled") return im.location === "staging" && !im.has_label;
-    if (stateFilter === "labeled") return im.location === "staging" && im.has_label;
-    // "all" — show everything (staging + promoted)
-    return true;
+    return matchesNonLabelFilters(im);
   });
 }
 
@@ -284,9 +301,40 @@ function renderCategoryChips() {
   }
 }
 
+// Rebuilt on every refilter so the counts track the category/state
+// chips. Preserves the current selection across rebuilds, and keeps a
+// selected class listed even when its count drops to 0 — otherwise
+// picking a class whose count is 0 under the active chips would
+// silently reset the dropdown to "Any label".
+function renderLabelClassFilter() {
+  const sel = state.filter.labelClassId;
+  const counts = new Map();
+  for (const im of state.allImages) {
+    if (!matchesNonLabelFilters(im)) continue;
+    for (const cid of im.classes || []) {
+      counts.set(cid, (counts.get(cid) || 0) + 1);
+    }
+  }
+  els.labelClass.innerHTML = "";
+  const any = document.createElement("option");
+  any.value = "";
+  any.textContent = "Any label";
+  els.labelClass.appendChild(any);
+  for (const { id, name } of state.classes) {
+    const n = counts.get(id) || 0;
+    if (!n && id !== sel) continue;
+    const opt = document.createElement("option");
+    opt.value = String(id);
+    opt.textContent = `${name} · ${n}`;
+    els.labelClass.appendChild(opt);
+  }
+  els.labelClass.value = sel === null ? "" : String(sel);
+}
+
 function refilter() {
   const prevKey = currentKey();
   applyFilter();
+  renderLabelClassFilter();
   // Try to preserve the focused image across filter changes.
   if (prevKey) {
     const idx = state.filtered.findIndex(im => keyOf(im) === prevKey);
@@ -705,10 +753,18 @@ async function saveCurrent({ silent = false } = {}) {
   const body = serializeYolo(state.boxes);
   await putLabel(im, body);
   state.dirty = false;
+  // Track what we just wrote so the label filter's counts stay honest
+  // without a refetch. Deliberately no refilter() here: if you're
+  // auditing `raccoon` and delete the bogus raccoon box, having the
+  // image vanish mid-edit is hostile. It drops out on the next filter
+  // change, which is when you're ready for the list to move.
+  const classesNow = [...new Set(state.boxes.map(b => b.cls_id))].sort((a, b) => a - b);
+  im.classes = classesNow;
+  const master = state.allImages.find(x => keyOf(x) === keyOf(im));
+  if (master) master.classes = classesNow;
   if (!im.has_label) {
     im.has_label = true;
     // Reflect in the master list too so filter toggles stay correct.
-    const master = state.allImages.find(x => keyOf(x) === keyOf(im));
     if (master) master.has_label = true;
     renderImageList();
   }
@@ -765,6 +821,7 @@ function removeCurrentFromList() {
   state.dirty = false;
   renderImageList();
   renderCategoryChips();
+  renderLabelClassFilter();
   loadAt(state.currentIdx);
 }
 
@@ -803,11 +860,13 @@ async function stageRandom(count) {
     // images are guaranteed visible regardless of any prior filter.
     state.filter.categories.clear();
     state.filter.state = "all";
+    state.filter.labelClassId = null;
     for (const b of els.stateChips.querySelectorAll("button")) {
       b.classList.toggle("active", b.dataset.state === "all");
     }
     renderCategoryChips();
     applyFilter();
+    renderLabelClassFilter();
 
     // Focus the first newly staged image when we can locate it.
     let idx = state.filtered.length ? 0 : -1;
@@ -880,6 +939,12 @@ function wireTools() {
       refilter();
     });
   }
+
+  els.labelClass.addEventListener("change", () => {
+    const v = els.labelClass.value;
+    state.filter.labelClassId = v === "" ? null : parseInt(v, 10);
+    refilter();
+  });
 }
 
 // ---------- New-box class hotkeys ----------
@@ -1017,6 +1082,7 @@ async function init() {
     populateClassDropdowns();
     renderCategoryChips();
     applyFilter();
+    renderLabelClassFilter();
     state.currentIdx = state.filtered.length ? 0 : -1;
     renderImageList();
     if (state.currentIdx >= 0) loadAt(0);

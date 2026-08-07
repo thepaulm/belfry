@@ -1170,7 +1170,8 @@ main#events-grid {
 
 .tool-row select,
 #new-box-class,
-#random-class {
+#random-class,
+#label-class-filter {
   background: #0b0d10;
   color: var(--fg);
   border: 1px solid #2a2f37;
@@ -1179,7 +1180,8 @@ main#events-grid {
   font-size: 0.85rem;
 }
 
-#random-class {
+#random-class,
+#label-class-filter {
   width: 100%;
   margin-bottom: 0.4em;
 }

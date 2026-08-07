@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>belfry · labeler</title>
-  <link rel="stylesheet" href="/static/viewer.css?v=24">
-  <script defer src="/static/training.js?v=8"></script>
+  <link rel="stylesheet" href="/static/viewer.css?v=28">
+  <script defer src="/static/training.js?v=9"></script>
 </head>
 <body class="training-body">
   <header>
@@ -33,6 +33,13 @@
       </div>
       <div class="rail-section">
         <div class="rail-label">Filter</div>
+        <select id="label-class-filter" class="tool-select">
+          <option value="">Any label</option>
+        </select>
+        <p class="muted small">
+          Filters on boxes actually in the label file, not the staging
+          folder — use it to audit one class across the whole set.
+        </p>
         <div id="category-chips" class="chip-row chip-row-wrap"></div>
         <div id="state-chips" class="chip-row chip-row-wrap">
           <button class="chip" data-state="unlabeled">Unlabeled</button>
