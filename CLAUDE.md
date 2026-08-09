@@ -76,6 +76,8 @@ The reverse SSH tunnel runs on the **Orin**, outbound to EC2 (autossh, `belfry-t
 - `127.0.0.1:8080` → Orin `:80` — the upstream Caddy reverse-proxies into.
 - `127.0.0.1:2222` → Orin `:22` — `ssh -J youruser@example.com youruser@127.0.0.1 -p 2222` from a laptop while travelling.
 
+EC2's sshd needs `ClientAliveInterval 30` / `ClientAliveCountMax 3` (`cloud/sshd-keepalive.conf` → `/etc/ssh/sshd_config.d/10-belfry-keepalive.conf`, installed by `install-ec2.sh`). OpenSSH defaults `ClientAliveInterval` to **0 — disabled**, so when the Orin reboots uncleanly its TCP connection dies mid-flight and EC2's sshd holds the orphaned `:8080` listener until the kernel's TCP timeout (~2 h) gives up. Every autossh retry meanwhile fails `remote port forwarding failed for listen port 8080` and exits 255 (`ExitOnForwardFailure=yes`), so **the public site is down while the LAN site is perfectly healthy** — the signature of this bug. Cost ~2 h on 2026-08-09 (25 retries, 18:41→20:44 UTC) before the drop-in existed. The `10-` prefix matters: sshd takes the *first* value seen for a keyword, so the file must sort ahead of other drop-ins.
+
 Auth model: there is no FastAPI-level auth. Caddy + oauth2-proxy gates the public path; LAN is trusted by network position. Removing the previous HTTP Basic layer eliminated the duplicate password popup once OAuth landed.
 
 ## Adding a user

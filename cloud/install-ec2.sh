@@ -88,6 +88,29 @@ fi
 
 install -m 0644 oauth2-proxy.service /etc/systemd/system/oauth2-proxy.service
 
+# --- sshd keepalive -----------------------------------------------------
+# Without this, an unclean Orin reboot orphans the reverse-tunnel forward on
+# 127.0.0.1:8080 for ~2h and the public site is dead the whole time. See the
+# header of sshd-keepalive.conf. Reload (not restart) so we can't drop the
+# session running this script; sshd -t first so a bad file never reaches the
+# running daemon.
+if grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' /etc/ssh/sshd_config; then
+    install -m 0600 -o root -g root sshd-keepalive.conf \
+        /etc/ssh/sshd_config.d/10-belfry-keepalive.conf
+    if sshd -t; then
+        systemctl reload sshd
+    else
+        echo "  >>> sshd -t FAILED; not reloading. Fix before trusting the tunnel." >&2
+    fi
+else
+    echo
+    echo "  >>> /etc/ssh/sshd_config has no 'Include /etc/ssh/sshd_config.d/*.conf'."
+    echo "      A drop-in would be ignored — append the ClientAlive lines from"
+    echo "      cloud/sshd-keepalive.conf to the END of sshd_config by hand,"
+    echo "      then: sudo sshd -t && sudo systemctl reload sshd"
+    echo
+fi
+
 # --- enable -------------------------------------------------------------
 
 systemctl daemon-reload
