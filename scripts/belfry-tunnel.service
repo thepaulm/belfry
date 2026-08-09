@@ -11,6 +11,12 @@ User=youruser
 #   :2222 → Orin :22   — `ssh -J example.com youruser@127.0.0.1 -p 2222`
 #                        from a laptop while travelling
 Environment="AUTOSSH_GATETIME=0"
+# Retry every 30s instead of autossh's 600s default. Pairs with EC2's
+# ClientAlive* drop-in (cloud/sshd-keepalive.conf): after an unclean Orin
+# reboot, sshd frees the orphaned :8080 forward at ~90s, and this decides how
+# long we then sit idle before rebinding. At the default that was up to 10
+# more minutes of public-site downtime for no reason.
+Environment="AUTOSSH_POLL=30"
 ExecStart=/usr/bin/autossh -M 0 -N \
   -o ServerAliveInterval=15 \
   -o ServerAliveCountMax=3 \
