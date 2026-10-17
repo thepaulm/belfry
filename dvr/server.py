@@ -18,7 +18,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 
-from . import auth, training, zones
+from . import auth, remote_gate, training, zones
 from .config import Camera, CameraSet, load_config
 from .health import probe_all
 from .retention import RetentionLoop
@@ -44,6 +44,11 @@ async def _lifespan(_: FastAPI):
 
 
 app = FastAPI(title="belfry-dvr", lifespan=_lifespan)
+
+# Backstop for FastAPI's own routes. The authoritative check is nginx's
+# auth_request on the :8081 (tunnel) server block, which also covers the
+# MediaMTX upstreams that never reach this process. See dvr/remote_gate.py.
+app.add_middleware(remote_gate.RemoteAllowListGate)
 
 
 def _camera_payload(c: Camera) -> dict:
@@ -105,6 +110,21 @@ async def api_retention_status() -> dict:
 # Bearer — bare 200/401 plus an X-Auth-Email header for downstream logs.
 # Neither endpoint gates anything else here; Caddy is the WAN gate, LAN
 # stays open by network position. See dvr/auth.py for the trust model.
+
+
+@app.get("/api/internal/remote-gate")
+async def remote_gate_check(request: Request) -> Response:
+    """nginx auth_request target for the :8081 tunnel ingress.
+
+    204 = allow, 403 = deny. nginx ignores the body. The URI being authorized
+    arrives as X-Original-URI; this endpoint's own path is the subrequest's.
+    """
+    headers = {k.lower(): v for k, v in request.headers.items()}
+    path = headers.get("x-original-uri", "").split("?", 1)[0]
+    ok, reason = remote_gate.check_request(path, headers)
+    if ok:
+        return Response(status_code=204)
+    return JSONResponse({"detail": "not authorized", "reason": reason}, status_code=403)
 
 
 @app.post("/auth/exchange")

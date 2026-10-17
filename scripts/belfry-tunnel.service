@@ -5,6 +5,11 @@ Wants=network-online.target
 
 [Service]
 User=youruser
+# NOTE: the HTTP forward targets the Orin's :8081, NOT :80. The port is the
+# trust boundary — :80 is the unauthenticated LAN ingress, :8081 requires an
+# allow-listed identity (see scripts/nginx-belfry.conf). Pointing this back at
+# :80 silently removes the second auth gate.
+#
 # Two reverse forwards land on EC2's loopback only (sshd's GatewayPorts=no
 # default keeps them off the public interface):
 #   :8080 → Orin :80   — Caddy reverse-proxies into this for the public site
@@ -23,7 +28,7 @@ ExecStart=/usr/bin/autossh -M 0 -N \
   -o ExitOnForwardFailure=yes \
   -o StrictHostKeyChecking=accept-new \
   -i /home/youruser/.ssh/bellfry_login \
-  -R 127.0.0.1:8080:127.0.0.1:80 \
+  -R 127.0.0.1:8080:127.0.0.1:8081 \
   -R 127.0.0.1:2222:127.0.0.1:22 \
   youruser@example.com
 Restart=always

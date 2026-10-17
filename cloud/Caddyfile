@@ -1,4 +1,17 @@
 example.com {
+	# Drop any identity headers the CLIENT sent before routing. Everything
+	# below sets these from its own auth response via copy_headers, and the
+	# Orin now rejects tunnel traffic whose identity isn't allow-listed
+	# (dvr/remote_gate.py). Without this strip, a caller could forge
+	# `X-Auth-Request-Email: <an allowed address>` and satisfy the Orin's
+	# gate on its own. With it, a gate here that fails open sends NO identity
+	# header at all, and the Orin denies the request — the two layers only
+	# pass together.
+	request_header -X-Auth-Request-Email
+	request_header -X-Auth-Request-User
+	request_header -X-Auth-Email
+	request_header -X-Belfry-Origin
+
 	# /oauth2/* (callback, sign_in, start, sign_out) IS the auth provider —
 	# must not be gated by forward_auth or we'd loop on the login URL itself.
 	handle /oauth2/* {

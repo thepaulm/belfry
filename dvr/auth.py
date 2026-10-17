@@ -45,6 +45,33 @@ class AuthError(Exception):
     """Any verification failure. Callers translate to HTTP 401."""
 
 
+def load_allowed_emails(path: str | os.PathLike | None = None) -> set[str]:
+    """Read the one-email-per-line allow-list.
+
+    Raises AuthError when the file is missing or has no entries — callers
+    MUST fail closed on that. An empty or absent allow-list means "let
+    nobody in", never "let everybody in". oauth2-proxy's `email_domains`
+    wildcard made exactly the opposite choice and silently disabled the
+    EC2 gate for five months (see cloud/oauth2-proxy.cfg).
+
+    Shared by the mobile bearer path (_init below) and the remote-origin
+    gate (dvr/remote_gate.py) so the two can't drift apart.
+    """
+    p = Path(
+        path or os.environ.get("BELFRY_ALLOWED_EMAILS_FILE", "/etc/belfry/allowed-emails")
+    )
+    if not p.is_file():
+        raise AuthError(f"{p} does not exist")
+    allowed = {
+        line.strip().lower()
+        for line in p.read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    if not allowed:
+        raise AuthError(f"{p} has no entries")
+    return allowed
+
+
 _initialized = False
 _secret: str = ""
 _client_ids: set[str] = set()
@@ -69,18 +96,7 @@ def _init() -> None:
     }
     if not client_ids:
         raise AuthError("BELFRY_GOOGLE_CLIENT_IDS is empty")
-    emails_file = Path(
-        os.environ.get("BELFRY_ALLOWED_EMAILS_FILE", "/etc/belfry/allowed-emails")
-    )
-    if not emails_file.is_file():
-        raise AuthError(f"{emails_file} does not exist")
-    allowed = {
-        line.strip().lower()
-        for line in emails_file.read_text().splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    }
-    if not allowed:
-        raise AuthError(f"{emails_file} has no entries")
+    allowed = load_allowed_emails()
     _secret = secret
     _client_ids = client_ids
     _allowed_emails = allowed
