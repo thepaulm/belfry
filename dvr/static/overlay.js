@@ -56,6 +56,52 @@ const _overlays = new Set();
 let _overlayCounter = 0;
 const _STAGGER_MS = 300;
 
+function _iou(p, q) {
+  const ix = Math.max(0, Math.min(p[2], q[2]) - Math.max(p[0], q[0]));
+  const iy = Math.max(0, Math.min(p[3], q[3]) - Math.max(p[1], q[1]));
+  const inter = ix * iy;
+  const u = (p[2] - p[0]) * (p[3] - p[1]) + (q[2] - q[0]) * (q[3] - q[1]) - inter;
+  return u > 0 ? inter / u : 0;
+}
+
+// Max normalized center-to-center travel between two 1 fps samples that
+// still counts as the same object (a car crossing the frame in ~3 s moves
+// ~0.33/s); beyond this two same-class boxes are treated as different objects.
+const _MAX_MATCH_DIST = 0.35;
+
+// Blend boxes from sample a toward sample b by f in [0,1]. Each a-box is
+// greedily paired with the same-class b-box of highest IoU (falling back to
+// nearest center within _MAX_MATCH_DIST for fast movers with no overlap).
+// Unmatched a-boxes hold in place; unmatched b-boxes appear at b's time.
+function interpolateBoxes(aBoxes, bBoxes, f) {
+  const pairs = [];
+  for (let i = 0; i < aBoxes.length; i++) {
+    for (let j = 0; j < bBoxes.length; j++) {
+      const p = aBoxes[i], q = bBoxes[j];
+      if (p[4] !== q[4]) continue;
+      const iou = _iou(p, q);
+      const dx = (p[0] + p[2] - q[0] - q[2]) / 2, dy = (p[1] + p[3] - q[1] - q[3]) / 2;
+      const dist = Math.hypot(dx, dy);
+      if (iou <= 0 && dist > _MAX_MATCH_DIST) continue;
+      pairs.push({ i, j, score: iou > 0 ? 1 + iou : 1 - dist });
+    }
+  }
+  pairs.sort((x, y) => y.score - x.score);
+  const usedA = new Set(), usedB = new Set(), out = [];
+  for (const { i, j } of pairs) {
+    if (usedA.has(i) || usedB.has(j)) continue;
+    usedA.add(i); usedB.add(j);
+    const p = aBoxes[i], q = bBoxes[j];
+    out.push([
+      p[0] + (q[0] - p[0]) * f, p[1] + (q[1] - p[1]) * f,
+      p[2] + (q[2] - p[2]) * f, p[3] + (q[3] - p[3]) * f,
+      p[4], p[5] + (q[5] - p[5]) * f,
+    ]);
+  }
+  aBoxes.forEach((p, i) => { if (!usedA.has(i)) out.push(p); });
+  return out;
+}
+
 class BoxOverlay {
   // host: a parent element (typically .video-wrap) that already has
   // position: relative. cam: camera name. The canvas inherits the
@@ -162,7 +208,10 @@ class BoxOverlay {
 
   _connectPast() {
     this._pastSamples = [];           // sorted by ts (server emits in order)
-    this._pastTolerance = 0.6;        // seconds; ≥ our 1 fps sample period
+    // Hold each 1 fps sample until the next one arrives. Must exceed the
+    // sample period: at 0.6 s boxes blanked for ~0.4 s of every second.
+    // The ceiling only clears boxes when samples stop (stream end/stall).
+    this._pastTolerance = 1.5;        // seconds
     this._es = new EventSource(this._pastUrl, { withCredentials: true });
     this._es.onmessage = (ev) => this._onPastMessage(ev);
     this._es.onerror = () => {
@@ -189,16 +238,31 @@ class BoxOverlay {
   _startPastWatcher() {
     if (!this._pastVideo) return;
     this._pastListener = () => this._renderPastFrame();
+    // timeupdate (~4 Hz) covers seeks and paused frames; an rAF loop while
+    // playing gives the interpolated boxes a smooth per-frame glide.
     this._pastVideo.addEventListener("timeupdate", this._pastListener);
+    this._pastVideo.addEventListener("seeked", this._pastListener);
+    this._pastRaf = null;
+    this._lastPastTarget = null;
+    const tick = () => {
+      const v = this._pastVideo;
+      if (!v) { this._pastRaf = null; return; }
+      if (!v.paused) this._renderPastFrame();
+      this._pastRaf = requestAnimationFrame(tick);
+    };
+    this._pastRaf = requestAnimationFrame(tick);
     // Render once immediately so the very first emitted box shows
-    // before the first timeupdate fires (timeupdate cadence is ~250 ms).
+    // before the first timeupdate fires.
     this._renderPastFrame();
   }
 
   _stopPastWatcher() {
     if (this._pastVideo && this._pastListener) {
       this._pastVideo.removeEventListener("timeupdate", this._pastListener);
+      this._pastVideo.removeEventListener("seeked", this._pastListener);
     }
+    if (this._pastRaf) cancelAnimationFrame(this._pastRaf);
+    this._pastRaf = null;
     this._pastListener = null;
     this._pastVideo = null;
   }
@@ -206,30 +270,32 @@ class BoxOverlay {
   _renderPastFrame() {
     if (!this._pastSamples || !this._pastVideo) return;
     const target = this._pastWindowStartUnix + this._pastVideo.currentTime;
-    // Step-hold: pick the most recent sample whose ts ≤ target. Using
-    // absolute-closest would let a future sample win (e.g. target=0.4
-    // is equidistant from samples at 0 and 1; the absolute-closest tie
-    // routinely picked the future one), which made boxes lead the
-    // object — a person walking right-to-left would have their box
-    // already at the left-of-where-they-are position. With 1 fps
-    // sampling the worst-case staleness is ~1s; we tolerate a tiny
-    // forward slop so the very first sample (typically ts ≈ start_unix
-    // for a window the user just opened, with target a hair behind it
-    // due to mp4 startup) still draws instead of clearing the canvas.
+    // Skip redundant redraws (rAF runs faster than the video advances).
+    if (target === this._lastPastTarget && this._pastSamples.length === this._lastPastCount) return;
+    this._lastPastTarget = target;
+    this._lastPastCount = this._pastSamples.length;
+    // a = most recent sample at/before target (tiny forward slop so the
+    // first sample of a freshly opened window still draws despite mp4
+    // startup lag); b = the sample after it. Picking "closest" instead of
+    // "at/before" made boxes lead the object.
     const samples = this._pastSamples;
-    let best = null;
+    let ai = -1;
     for (let i = samples.length - 1; i >= 0; i--) {
-      const s = samples[i];
-      if (s.ts <= target + 0.05) {
-        best = s;
-        break;
-      }
+      if (samples[i].ts <= target + 0.05) { ai = i; break; }
     }
-    if (best && (target - best.ts) <= this._pastTolerance) {
-      this._draw(best.boxes || []);
-    } else {
+    const a = ai >= 0 ? samples[ai] : null;
+    if (!a || (target - a.ts) > this._pastTolerance) {
       this._clear();
+      return;
     }
+    const b = samples[ai + 1];
+    const span = b ? b.ts - a.ts : 0;
+    if (!b || span <= 0 || span > this._pastTolerance) {
+      this._draw(a.boxes || []);    // no usable next sample yet: hold
+      return;
+    }
+    const f = Math.min(1, Math.max(0, (target - a.ts) / span));
+    this._draw(interpolateBoxes(a.boxes || [], b.boxes || [], f));
   }
 
   destroy() {
