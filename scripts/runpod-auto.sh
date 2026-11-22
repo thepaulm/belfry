@@ -51,14 +51,17 @@ GPU_ID="${BELFRY_GPU_ID:-NVIDIA A40}"
 # A CUDA+torch image; train-on-pod.sh pip-installs ultralytics on top.
 POD_IMAGE="${BELFRY_POD_IMAGE:-runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04}"
 CONTAINER_DISK_GB="${BELFRY_POD_DISK_GB:-40}"        # torch image + dataset + run dir
-MAX_HOURS="${BELFRY_POD_MAX_HOURS:-2}"               # server-side auto-terminate backstop
+MAX_HOURS="${BELFRY_POD_MAX_HOURS:-2}"               # pod-side self-delete backstop (see "arming backstop")
+EPOCHS="${BELFRY_EPOCHS:-100}"                       # baked into train-on-pod.sh; e.g. 3 for an API smoke test
 SSH_KEY="${BELFRY_SSH_KEY:-$HOME/.ssh/runpod}"        # pub is the key registered via `runpodctl ssh add-key`
 # The proxy SSH username ("<podId>-<perPodSuffix>") and real readiness come
 # from RunPod's GraphQL API (machine.podHostId / runtime), NOT runpodctl —
 # `runpodctl ssh info`/`pod get` report "pod not ready"/uptime 0 indefinitely
 # on secure-cloud pods even while SSH works, and the suffix is per-pod (a
 # counter, not a key fingerprint) so it can't be hardcoded.
-RUNPODCTL_VER="${BELFRY_RUNPODCTL_VER:-v2.3.0}"      # pin pod's runpodctl to match the Orin's (croc protocol)
+RUNPODCTL_VER="${BELFRY_RUNPODCTL_VER:-v3.1.1}"      # pin pod's runpodctl to match the Orin's (croc protocol)
+# >=3.0 is required: older builds call rest.runpod.io/v1, which RunPod retired
+# (NXDOMAIN) when the CLI moved to rest v2 at api.runpod.io/v2.
 REMOTE_DIR="/home/paulm/belfry-training"             # train-on-pod.sh cds here, hardcoded
 POLL_S=30                                            # training log poll interval
 # ---------------------------------------------------------------------------
@@ -139,6 +142,17 @@ ready = '1' if (p or {}).get('runtime') is not None else '0'
 print(f'{host}\t{ready}')
 " "$1"; }
 
+# pod_delete <pod-id>: runpodctl first, GraphQL podTerminate as a fallback so a
+# CLI/REST-side break (e.g. the 2026-11 rest v1 retirement) can't leave a GPU billing.
+pod_delete() {
+  runpodctl pod delete "$1" >/dev/null 2>&1 && return 0
+  echo "  runpodctl pod delete failed; falling back to GraphQL podTerminate"
+  curl -s "https://api.runpod.io/graphql?api_key=${RUNPOD_KEY}" \
+       -H 'Content-Type: application/json' \
+       -d "{\"query\":\"mutation { podTerminate(input:{podId:\\\"$1\\\"}) }\"}" \
+    | grep -q '"podTerminate":null' && ! pod_query "$1" | grep -q $'\t'1
+}
+
 # ---- unified cleanup (installed before anything can fail) -----------------
 # One trap for the whole run: tidy temp files, and once a pod exists, pull the
 # training log on failure (before the pod is gone) then delete it, and push a
@@ -159,7 +173,7 @@ cleanup() {
       echo -e "\n--keep-pod: leaving $POD_ID alive. Delete it: runpodctl pod delete $POD_ID"
     else
       log "deleting pod $POD_ID"
-      runpodctl pod delete "$POD_ID" || echo "WARN: pod delete failed — check console for $POD_ID"
+      pod_delete "$POD_ID" || echo "WARN: pod delete failed — check console for $POD_ID"
     fi
   fi
   if [ "$DONE_OK" = 1 ]; then
@@ -178,6 +192,8 @@ trap cleanup EXIT
 log "preflight (VERSION=$VERSION)"
 [ -n "$RUNPOD_KEY" ] || die "no RunPod API key (RUNPOD_API_KEY env or apikey in ~/.runpod/config.toml). See setup at top."
 command -v runpodctl >/dev/null || die "runpodctl not installed"
+LOCAL_RPC="v$(runpodctl version 2>/dev/null | awk '{print $2}' | cut -d- -f1)"
+[ "$LOCAL_RPC" = "$RUNPODCTL_VER" ] || die "Orin runpodctl is $LOCAL_RPC, need $RUNPODCTL_VER (croc must match the pod's; see runme.sh)"
 command -v curl >/dev/null || die "curl not installed (needed for the GraphQL API)"
 [ -f "$REPO/yolo11l-headext.pt" ] || die "missing yolo11l-headext.pt (run scripts/extend-head.py)"
 [ -d "$HOME/belfry-training/images" ] || die "no training images at ~/belfry-training/images"
@@ -195,7 +211,7 @@ fi
 # Bundle exactly like runpod-1: dataset tree + headext base + the train
 # script with VERSION baked in, all landing at the root of $REMOTE_DIR.
 STAGE="$(mktemp -d)"; TAR="/tmp/belfry-${VERSION}.tar"   # cleaned up by the EXIT trap
-sed "s/^VERSION=.*/VERSION=${VERSION}/" scripts/runpod-2-train-on-pod.sh > "$STAGE/train-on-pod.sh"
+sed -e "s/^VERSION=.*/VERSION=${VERSION}/" -e "s/^EPOCHS=.*/EPOCHS=${EPOCHS}/" scripts/runpod-2-train-on-pod.sh > "$STAGE/train-on-pod.sh"
 tar cf "$TAR" -C "$HOME/belfry-training" . \
     -C "$REPO" yolo11l-headext.pt \
     -C "$STAGE" train-on-pod.sh
@@ -207,18 +223,16 @@ if [ -n "$REUSE_POD" ]; then
   log "reusing existing pod $POD_ID (won't be deleted)"
 else
   log "creating pod ($GPU_ID)"
-  TERMINATE_AT="$(date -u -d "+${MAX_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ)"
   CREATE_JSON="$(runpodctl pod create \
     --name "belfry-${VERSION}" \
     --gpu-id "$GPU_ID" \
     --image "$POD_IMAGE" \
     --container-disk-in-gb "$CONTAINER_DISK_GB" \
     --ssh \
-    --terminate-after "$TERMINATE_AT" \
     -o json)"
   POD_ID="$(echo "$CREATE_JSON" | jget .id)"
   [ -n "$POD_ID" ] || { echo "$CREATE_JSON" >&2; die "pod create returned no id"; }
-  echo "pod id: $POD_ID  (auto-terminate backstop: $TERMINATE_AT)"
+  echo "pod id: $POD_ID"
 fi
 # From here the EXIT trap (installed at the top) owns teardown: pod delete on
 # any exit so a crash can't leave a GPU billing (unless --keep-pod / --pod-id).
@@ -282,6 +296,17 @@ log "pinning pod runpodctl to $RUNPODCTL_VER"
 pod_ssh "wget -qO /usr/local/bin/runpodctl https://github.com/runpod/runpodctl/releases/download/${RUNPODCTL_VER}/runpodctl-linux-amd64 && chmod +x /usr/local/bin/runpodctl && hash -r && runpodctl version" \
   | sed 's/^/    pod runpodctl: /' || die "could not upgrade pod runpodctl"
 
+# Backstop if the Orin dies mid-run: runpodctl 2.12 dropped --terminate-after,
+# so the pod deletes itself after MAX_HOURS using the pod-scoped RUNPOD_API_KEY
+# RunPod injects into the container. Read from PID 1's environ because the proxy
+# SSH shell doesn't inherit the container env. Never ships our account key.
+log "arming pod-side self-delete backstop (${MAX_HOURS}h)"
+pod_ssh "if export \$(tr '\\0' '\\n' </proc/1/environ | grep -E '^RUNPOD_(API_KEY|POD_ID)=' | xargs) && \
+            test -n \"\$RUNPOD_API_KEY\" && test -n \"\$RUNPOD_POD_ID\"; then \
+           setsid bash -c 'sleep ${MAX_HOURS}h; runpodctl pod delete \$RUNPOD_POD_ID' </dev/null >/root/backstop.log 2>&1 & \
+           echo BACKSTOP_ARMED; fi" \
+  | grep -q BACKSTOP_ARMED || echo "  WARN: backstop not armed (no RUNPOD_API_KEY/RUNPOD_POD_ID in pod env)"
+
 # ---- push dataset (croc) --------------------------------------------------
 # croc rewrites a passed --code (appends a shard count), so we DON'T pin the
 # code — we let `send` print one and parse it from its output, then hand that
@@ -316,7 +341,7 @@ pod_ssh "cd $REMOTE_DIR && rm -f train.log train.rc && \
          </dev/null >/dev/null 2>&1 & echo launched" \
   | sed 's/^/    /' || die "could not launch training on pod"
 
-log "training — polling every ${POLL_S}s (auto-terminates in ${MAX_HOURS}h max)"
+log "training ${EPOCHS} epochs — polling every ${POLL_S}s (pod self-deletes in ${MAX_HOURS}h max)"
 RC=""
 while true; do
   sleep "$POLL_S"
@@ -359,7 +384,7 @@ if [ "$KEEP_POD" = 1 ]; then
   echo "  --keep-pod: leaving $POD_ID up. Delete: runpodctl pod delete $POD_ID"
 else
   log "deleting pod $POD_ID (weights pulled; no longer needed)"
-  runpodctl pod delete "$POD_ID" && POD_ID="" || echo "WARN: delete failed; EXIT trap will retry"
+  pod_delete "$POD_ID" && POD_ID="" || echo "WARN: delete failed; EXIT trap will retry"
 fi
 
 # ---- TRT export + swap ----------------------------------------------------

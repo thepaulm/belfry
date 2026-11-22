@@ -8,6 +8,7 @@ set -euo pipefail
 
 # Overwritten by runpod-1-send-to-pod.sh at bundle time from scripts/runpod-version.
 VERSION=v1.1
+EPOCHS=100
 
 cd /home/paulm/belfry-training
 
@@ -23,7 +24,7 @@ pip install ultralytics
 # table — under-fed classes (coyote, squirrel) will lag; that's the data, not
 # the run.
 yolo detect train model=yolo11l-headext.pt data=dataset.train.yaml \
-    epochs=100 imgsz=640 batch=32 freeze=10 name="belfry-${VERSION}"
+    epochs=${EPOCHS} imgsz=640 batch=32 freeze=10 name="belfry-${VERSION}"
 
 echo
 echo "Done. Send the weights back (prints a one-time code):"
