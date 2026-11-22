@@ -316,8 +316,34 @@ class BoxOverlay {
     // CSS pixel size and box edges stay crisp.
     const w = Math.max(1, Math.floor(r.width));
     const h = Math.max(1, Math.floor(r.height));
-    if (this.canvas.width !== w) this.canvas.width = w;
-    if (this.canvas.height !== h) this.canvas.height = h;
+    if (this.canvas.width === w && this.canvas.height === h) return;
+    // Resizing the buffer clears it; redraw so boxes track the new layout
+    // even when paused or between live batches.
+    this.canvas.width = w;
+    this.canvas.height = h;
+    if (this._lastBoxes) this._draw(this._lastBoxes);
+  }
+
+  // The rect (canvas px) where the video frame is actually painted. Boxes
+  // are normalized to the frame, not the host: playback's <video> is
+  // letterboxed (object-fit: contain) and live tiles crop (cover), so
+  // mapping onto the full host put boxes in the bars or off the frame.
+  _videoRect() {
+    const W = this.canvas.width, H = this.canvas.height;
+    const v = this.host.querySelector("video");
+    if (!v || !v.videoWidth || !v.videoHeight) return { x: 0, y: 0, w: W, h: H };
+    const hr = this.host.getBoundingClientRect();
+    const vr = v.getBoundingClientRect();
+    const ex = vr.left - hr.left, ey = vr.top - hr.top;
+    const ew = vr.width, eh = vr.height;
+    const fit = getComputedStyle(v).objectFit;
+    if (fit === "fill") return { x: ex, y: ey, w: ew, h: eh };
+    // contain/scale-down/none treated as contain; object-position assumed centered.
+    const k = fit === "cover"
+      ? Math.max(ew / v.videoWidth, eh / v.videoHeight)
+      : Math.min(ew / v.videoWidth, eh / v.videoHeight);
+    const w = v.videoWidth * k, h = v.videoHeight * k;
+    return { x: ex + (ew - w) / 2, y: ey + (eh - h) / 2, w, h };
   }
 
   _connect() {
@@ -343,20 +369,21 @@ class BoxOverlay {
   }
 
   _clear() {
+    this._lastBoxes = null;
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
   }
 
   _draw(boxes) {
-    const w = this.canvas.width;
-    const h = this.canvas.height;
+    const { x: ox, y: oy, w, h } = this._videoRect();
     this._clear();
+    this._lastBoxes = boxes;   // after _clear, which resets it
     this.ctx.lineWidth = 2;
     this.ctx.font = "12px -apple-system, system-ui, sans-serif";
     this.ctx.textBaseline = "top";
 
     for (const b of boxes) {
       const [x1, y1, x2, y2, cls, conf] = b;
-      const px1 = x1 * w, py1 = y1 * h;
+      const px1 = ox + x1 * w, py1 = oy + y1 * h;
       const pw = (x2 - x1) * w, ph = (y2 - y1) * h;
       const color = colorFor(cls);
 
