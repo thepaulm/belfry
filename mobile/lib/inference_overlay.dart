@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
@@ -174,7 +176,7 @@ class _PastSample {
 
 /// Subscribes to `/api/inference/playback?cam=&start=&duration=` for a
 /// past mp4 window and accumulates per-frame box samples. Look up the
-/// closest sample to a given playback timestamp with [boxesNear].
+/// (interpolated) boxes for a playback timestamp with [boxesAt].
 ///
 /// Unlike the live client, this is one-shot: the server side runs the
 /// detector over the recorded mp4 at ~1 fps and emits boxes as fast as
@@ -212,32 +214,40 @@ class InferencePlaybackClient {
     _connect();
   }
 
-  /// Closest sample to [tsUnix] within ±0.5s, or empty if none.
-  List<Detection> boxesNear(double tsUnix) {
+  /// Boxes to draw at [tsUnix]. Mirrors dvr/static/overlay.js: take the
+  /// latest sample at/before [tsUnix] and, when the next sample is within
+  /// [_tolerance], interpolate matched boxes between the two so they glide
+  /// instead of stepping at 1 fps. Empty once samples stop (stream end/stall).
+  List<Detection> boxesAt(double tsUnix) {
     if (_samples.isEmpty) return const [];
-    // Binary search for insertion point.
+    // First index with ts > tsUnix + slop; the sample before it is `a`. The
+    // slop lets a freshly opened window draw its first sample despite mp4
+    // startup lag. Picking "closest" instead made boxes lead the object.
     var lo = 0, hi = _samples.length;
+    final key = tsUnix + 0.05;
     while (lo < hi) {
       final mid = (lo + hi) >> 1;
-      if (_samples[mid].ts < tsUnix) {
+      if (_samples[mid].ts <= key) {
         lo = mid + 1;
       } else {
         hi = mid;
       }
     }
-    _PastSample? best;
-    double bestDiff = double.infinity;
-    for (final i in [lo - 1, lo]) {
-      if (i < 0 || i >= _samples.length) continue;
-      final diff = (_samples[i].ts - tsUnix).abs();
-      if (diff < bestDiff) {
-        bestDiff = diff;
-        best = _samples[i];
-      }
-    }
-    if (best == null || bestDiff > 0.5) return const [];
-    return best.boxes;
+    final ai = lo - 1;
+    if (ai < 0) return const [];
+    final a = _samples[ai];
+    if (tsUnix - a.ts > _tolerance) return const [];
+    if (ai + 1 >= _samples.length) return a.boxes;
+    final b = _samples[ai + 1];
+    final span = b.ts - a.ts;
+    if (span <= 0 || span > _tolerance) return a.boxes;
+    final f = ((tsUnix - a.ts) / span).clamp(0.0, 1.0);
+    if (f == 0) return a.boxes;
+    return interpolateDetections(a.boxes, b.boxes, f);
   }
+
+  // Hold each 1 fps sample until the next one; must exceed the sample period.
+  static const double _tolerance = 1.5;
 
   Future<void> _connect() async {
     final s = auth.session;
@@ -325,6 +335,61 @@ class InferencePlaybackClient {
   }
 }
 
+double _iou(Detection p, Detection q) {
+  final ix = (math.min(p.x2, q.x2) - math.max(p.x1, q.x1)).clamp(0.0, 1.0);
+  final iy = (math.min(p.y2, q.y2) - math.max(p.y1, q.y1)).clamp(0.0, 1.0);
+  final inter = ix * iy;
+  final u = (p.x2 - p.x1) * (p.y2 - p.y1) + (q.x2 - q.x1) * (q.y2 - q.y1) - inter;
+  return u > 0 ? inter / u : 0;
+}
+
+// Max normalized center travel between two 1 fps samples that still counts
+// as the same object; matches _MAX_MATCH_DIST in overlay.js.
+const double _maxMatchDist = 0.35;
+
+/// Blend boxes from sample a toward sample b by [f] in [0,1]. Each a-box is
+/// greedily paired with the same-class b-box of highest IoU (falling back to
+/// nearest center within [_maxMatchDist] for fast movers with no overlap).
+/// Unmatched a-boxes hold in place; unmatched b-boxes appear at b's time.
+List<Detection> interpolateDetections(
+    List<Detection> a, List<Detection> b, double f) {
+  final pairs = <(int, int, double)>[];
+  for (var i = 0; i < a.length; i++) {
+    for (var j = 0; j < b.length; j++) {
+      final p = a[i], q = b[j];
+      if (p.cls != q.cls) continue;
+      final iou = _iou(p, q);
+      final dx = (p.x1 + p.x2 - q.x1 - q.x2) / 2;
+      final dy = (p.y1 + p.y2 - q.y1 - q.y2) / 2;
+      final dist = math.sqrt(dx * dx + dy * dy);
+      if (iou <= 0 && dist > _maxMatchDist) continue;
+      pairs.add((i, j, iou > 0 ? 1 + iou : 1 - dist));
+    }
+  }
+  pairs.sort((x, y) => y.$3.compareTo(x.$3));
+  final usedA = <int>{}, usedB = <int>{};
+  final out = <Detection>[];
+  double lerp(double x, double y) => x + (y - x) * f;
+  for (final (i, j, _) in pairs) {
+    if (usedA.contains(i) || usedB.contains(j)) continue;
+    usedA.add(i);
+    usedB.add(j);
+    final p = a[i], q = b[j];
+    out.add(Detection(
+      x1: lerp(p.x1, q.x1),
+      y1: lerp(p.y1, q.y1),
+      x2: lerp(p.x2, q.x2),
+      y2: lerp(p.y2, q.y2),
+      cls: p.cls,
+      conf: lerp(p.conf, q.conf),
+    ));
+  }
+  for (var i = 0; i < a.length; i++) {
+    if (!usedA.contains(i)) out.add(a[i]);
+  }
+  return out;
+}
+
 // Colors mirror dvr/static/overlay.js's CLASS_COLOR so live boxes look
 // identical between web and mobile.
 const _classColor = <String, Color>{
@@ -342,14 +407,23 @@ const _defaultColor = Color(0xffaaaaaa);
 
 Color _colorFor(String cls) => _classColor[cls] ?? _defaultColor;
 
-/// Paints normalized [Detection] boxes over the host's full rect.
-/// Boxes are scaled assuming the video fills the rect (BoxFit.cover at
-/// matching aspect ratio); for cameras with non-matching aspect the
-/// boxes may be slightly off near the cropped edges, which is fine for
-/// the live-tile size we use.
+/// Paints normalized [Detection] boxes over the video frame. Boxes are
+/// normalized to the frame, so when the host crops or letterboxes the video
+/// pass [videoSize] + [fit] (same as the video's FittedBox) and boxes map
+/// onto the painted rect; without them the frame is assumed to fill the host.
+/// Pass [listenable] to repaint without rebuilding (per-frame interpolation).
 class BoxOverlay extends StatelessWidget {
-  const BoxOverlay({super.key, required this.detections});
+  const BoxOverlay({
+    super.key,
+    this.detections = const [],
+    this.listenable,
+    this.videoSize,
+    this.fit = BoxFit.fill,
+  });
   final List<Detection> detections;
+  final ValueListenable<List<Detection>>? listenable;
+  final Size? videoSize;
+  final BoxFit fit;
 
   @override
   Widget build(BuildContext context) {
@@ -357,7 +431,7 @@ class BoxOverlay extends StatelessWidget {
       // Boxes shouldn't swallow taps — the tile is supposed to remain
       // tappable to open the playback screen.
       child: CustomPaint(
-        painter: _BoxPainter(detections),
+        painter: _BoxPainter(detections, listenable, videoSize, fit),
         child: const SizedBox.expand(),
       ),
     );
@@ -365,8 +439,22 @@ class BoxOverlay extends StatelessWidget {
 }
 
 class _BoxPainter extends CustomPainter {
-  _BoxPainter(this.detections);
-  final List<Detection> detections;
+  _BoxPainter(this._detections, this.listenable, this.videoSize, this.fit)
+      : super(repaint: listenable);
+  final List<Detection> _detections;
+  final ValueListenable<List<Detection>>? listenable;
+  final Size? videoSize;
+  final BoxFit fit;
+
+  List<Detection> get detections => listenable?.value ?? _detections;
+
+  // Rect within [size] where the video frame is painted.
+  Rect _frameRect(Size size) {
+    final vs = videoSize;
+    if (vs == null || vs.isEmpty) return Offset.zero & size;
+    final fitted = applyBoxFit(fit, vs, size).destination;
+    return Alignment.center.inscribe(fitted, Offset.zero & size);
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -381,12 +469,15 @@ class _BoxPainter extends CustomPainter {
       ..strokeWidth = strokeWidth;
     final fill = Paint()..style = PaintingStyle.fill;
 
+    final fr = _frameRect(size);
+    canvas.save();
+    canvas.clipRect(Offset.zero & size);
     for (final d in detections) {
       final r = Rect.fromLTRB(
-        d.x1 * size.width,
-        d.y1 * size.height,
-        d.x2 * size.width,
-        d.y2 * size.height,
+        fr.left + d.x1 * fr.width,
+        fr.top + d.y1 * fr.height,
+        fr.left + d.x2 * fr.width,
+        fr.top + d.y2 * fr.height,
       );
       final color = _colorFor(d.cls);
       stroke.color = color;
@@ -420,6 +511,7 @@ class _BoxPainter extends CustomPainter {
       canvas.drawRect(chipRect, fill);
       tp.paint(canvas, Offset(r.left + padX, chipY + padY));
     }
+    canvas.restore();
   }
 
   void _drawDashedRect(Canvas canvas, Rect r, Paint p,
@@ -452,5 +544,8 @@ class _BoxPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_BoxPainter old) =>
-      !identical(old.detections, detections);
+      !identical(old._detections, _detections) ||
+      old.listenable != listenable ||
+      old.videoSize != videoSize ||
+      old.fit != fit;
 }

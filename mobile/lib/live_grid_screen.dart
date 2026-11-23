@@ -311,7 +311,15 @@ class _LiveTileState extends State<_LiveTile> {
             children: [
               _videoOrPlaceholder(),
               if (_detections.isNotEmpty)
-                Positioned.fill(child: BoxOverlay(detections: _detections)),
+                Positioned.fill(
+                  child: BoxOverlay(
+                    detections: _detections,
+                    // Tile crops the frame (BoxFit.cover below); map boxes
+                    // onto the same painted rect.
+                    videoSize: _controller?.value.size,
+                    fit: BoxFit.cover,
+                  ),
+                ),
               Positioned(
                 left: 6,
                 bottom: 4,

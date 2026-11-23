@@ -16,6 +16,10 @@ class _EventsScreenState extends State<EventsScreen> {
   late final ApiClient _api = ApiClient(widget.auth);
   final List<Event> _events = [];
   Map<String, Camera> _cameraIndex = const {};
+  // Config order, for the camera filter row.
+  List<Camera> _cameras = const [];
+  // null = all cameras; otherwise passed as /api/events?cam=<name>.
+  String? _cam;
   bool _loading = true;
   bool _loadingMore = false;
   bool _atEnd = false;
@@ -49,11 +53,13 @@ class _EventsScreenState extends State<EventsScreen> {
     try {
       final cams = await _api.getAllCameras();
       final events = await _api.getEvents(
+        cam: _cam,
         cls: _cls == 'all' ? null : _cls,
         limit: _pageSize,
       );
       if (!mounted) return;
       setState(() {
+        _cameras = cams;
         _cameraIndex = {for (final c in cams) c.name: c};
         _events.addAll(events);
         _loading = false;
@@ -73,6 +79,7 @@ class _EventsScreenState extends State<EventsScreen> {
     setState(() => _loadingMore = true);
     try {
       final next = await _api.getEvents(
+        cam: _cam,
         cls: _cls == 'all' ? null : _cls,
         beforeId: _events.last.id,
         limit: _pageSize,
@@ -95,6 +102,12 @@ class _EventsScreenState extends State<EventsScreen> {
   void _selectClass(String cls) {
     if (cls == _cls) return;
     setState(() => _cls = cls);
+    _loadInitial();
+  }
+
+  void _selectCamera(String? cam) {
+    if (cam == _cam) return;
+    setState(() => _cam = cam);
     _loadInitial();
   }
 
@@ -124,6 +137,7 @@ class _EventsScreenState extends State<EventsScreen> {
       body: Column(
         children: [
           _classFilterBar(),
+          if (_cameras.length > 1) _cameraFilterBar(),
           Expanded(
             child: RefreshIndicator(
               onRefresh: _loadInitial,
@@ -159,6 +173,29 @@ class _EventsScreenState extends State<EventsScreen> {
             accent: accent,
             selected: selected,
             onTap: () => _selectClass(cls),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _cameraFilterBar() {
+    final accent = Theme.of(context).colorScheme.primary;
+    return SizedBox(
+      height: 44,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+        itemCount: _cameras.length + 1,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (ctx, i) {
+          // Index 0 is "All cameras"; the rest follow config order.
+          final cam = i == 0 ? null : _cameras[i - 1];
+          return _ClassChip(
+            label: cam == null ? 'All cameras' : cam.label,
+            accent: accent,
+            selected: cam?.name == _cam,
+            onTap: () => _selectCamera(cam?.name),
           );
         },
       ),

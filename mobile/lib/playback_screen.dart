@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:video_player/video_player.dart';
 
 import 'api.dart';
@@ -28,7 +30,8 @@ class PlaybackScreen extends StatefulWidget {
   State<PlaybackScreen> createState() => _PlaybackScreenState();
 }
 
-class _PlaybackScreenState extends State<PlaybackScreen> {
+class _PlaybackScreenState extends State<PlaybackScreen>
+    with SingleTickerProviderStateMixin {
   late final ApiClient _api = ApiClient(widget.auth);
 
   // Visible-window model — mirrors the web playback page. _viewScale picks
@@ -92,7 +95,23 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
   StreamSubscription<List<Detection>>? _inferenceLiveSub;
   InferencePlaybackClient? _inferencePast;
   StreamSubscription<void>? _inferencePastSub;
+  // Live-mode boxes (rebuild on each 1 fps batch).
   List<Detection> _detections = const [];
+  // Past-mode boxes, interpolated per vsync frame. A ValueNotifier repaints
+  // the overlay without rebuilding the screen; _pastShowing flips (with a
+  // rebuild) only when boxes appear/disappear, to swap the widget tree.
+  final ValueNotifier<List<Detection>> _pastBoxes = ValueNotifier(const []);
+  bool _pastShowing = false;
+  Ticker? _pastTicker;
+  // video_player reports position only every ~500 ms on Android, too coarse
+  // for a smooth glide. Anchor the last reported position and extrapolate
+  // from wall-clock elapsed while playing.
+  Duration _posAnchor = Duration.zero;
+  final Stopwatch _posClock = Stopwatch();
+  double _lastPastTs = 0;
+  // Set once a near-live window has played to its end and we've hopped to live.
+  bool _autoLiveFired = false;
+  Timer? _listRefresh;
 
   @override
   void initState() {
@@ -119,6 +138,10 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
     _viewStartSec = _snappedStart(_sliderSec);
     _stallWatchdog =
         Timer.periodic(const Duration(seconds: 1), (_) => _checkStall());
+    // Keep the availability bar growing at the live edge.
+    _listRefresh = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (mounted && _selectedDay.isAtSameMomentAs(_today)) _loadList();
+    });
     _refreshDayEvents();
     if (initial != null) {
       // Deep-link (alert/event tap): the availability ranges must be
@@ -138,11 +161,10 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
   }
 
   // Load a past window that *contains* `targetSec` and seek playback to it.
-  // Used by deep-links (event/alert tap). A plain _loadWindowAt(targetSec)
-  // would, for a moment within ~5 min of live, see the 5-min window overrun
-  // the live edge and snap to the live stream — stranding the user at live
-  // instead of on the event. Here we slide the window start back far enough
-  // that the whole window sits before live, then seek to the target inside it.
+  // Entry point for scrub release, pip taps, slice steps and deep-links. For
+  // a moment near live the window start slides back so the whole window sits
+  // before the live edge (more footage around the target), then playback
+  // seeks forward to the target inside it.
   Future<void> _loadWindowContaining(double targetSec) async {
     final live = _liveEdgeOfSelectedDay();
     if (live == null) {
@@ -156,12 +178,9 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
       await _enterLive();
       return;
     }
-    // Latest window start that keeps the whole window off the live edge, so
-    // _loadWindowAt's own live-snap guard doesn't fire and bounce us to live.
-    final latestStart =
-        (live - _windowDuration.inSeconds - _liveSnapWindow.inSeconds)
-            .clamp(0.0, 86399.0);
-    final startSec = targetSec.clamp(0.0, latestStart);
+    final latestStart = math.max(
+        0.0, live - _windowDuration.inSeconds - _liveSnapWindow.inSeconds);
+    final startSec = math.min(targetSec, latestStart);
     await _loadWindowAt(startSec, seekToSec: targetSec);
   }
 
@@ -235,7 +254,7 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
       _viewStartSec = newStart;
       _sliderSec = newStart;
     });
-    _loadWindowAt(newStart);
+    _loadWindowContaining(newStart);
   }
 
   // Label for the current visible window, e.g. "14:00 – 15:00". Empty in
@@ -304,11 +323,24 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
   DateTime _absoluteTime(double sliderSec) =>
       _selectedDay.add(Duration(milliseconds: (sliderSec * 1000).round()));
 
-  bool _absTimeHasFootage(DateTime t) {
+  PlaybackRange? _rangeContaining(DateTime t) {
     for (final r in _ranges) {
-      if (!t.isBefore(r.start) && t.isBefore(r.end)) return true;
+      if (!t.isBefore(r.start) && t.isBefore(r.end)) return r;
     }
-    return false;
+    return null;
+  }
+
+  // True when `t` is past the end of every known range. The list is fetched
+  // periodically, so it lags the live edge (and MediaMTX may not count the
+  // in-progress segment); such times are tried against the server rather
+  // than rejected locally.
+  bool _isAfterKnownFootage(DateTime t) {
+    if (_ranges.isEmpty) return true;
+    var end = _ranges.first.end;
+    for (final r in _ranges) {
+      if (r.end.isAfter(end)) end = r.end;
+    }
+    return !t.isBefore(end);
   }
 
   // `seekToSec` (sec-of-day) is where playback should land inside the loaded
@@ -319,24 +351,35 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
     debugPrint(
       '[belfry][pb:${widget.cameraName}] loadWindowAt sliderSec=${sliderSec.toStringAsFixed(1)} force=$force',
     );
-    final start = _absoluteTime(sliderSec);
+    var start = _absoluteTime(sliderSec);
     final seekTarget = _absoluteTime(seekToSec ?? sliderSec);
     final now = DateTime.now();
 
-    if (start.add(_windowDuration).isAfter(now.subtract(_liveSnapWindow))) {
+    // Only the target decides live vs past. A window that runs past now is
+    // fine: the server returns the footage up to now (same as the web page).
+    if (seekTarget.isAfter(now.subtract(_liveSnapWindow))) {
       await _enterLive();
       return;
     }
 
-    if (!_absTimeHasFootage(start)) {
-      await _stopPlayer();
-      setState(() => _playerError = 'no footage at this time');
-      return;
+    final range = _rangeContaining(seekTarget);
+    if (range == null) {
+      if (!_isAfterKnownFootage(seekTarget)) {
+        await _stopPlayer();
+        setState(() => _playerError = 'no footage at this time');
+        return;
+      }
+      unawaited(_loadList());
+    } else if (start.isBefore(range.start)) {
+      // Window would begin in a recording gap; MediaMTX would start the mp4
+      // at the next segment and the seek offset would land late.
+      start = range.start;
     }
 
     final cur = _player;
     final wStart = _windowStart;
-    // Fast path: target lands inside the already-loaded window — just seek.
+    // Fast path: target lands inside the already-loaded footage — just seek.
+    // Uses the real mp4 duration, which is short for a window near live.
     // Skipped when `force` (stall recovery) so we rebuild the controller and
     // get a fresh connection instead of reusing the wedged one.
     if (!force &&
@@ -344,8 +387,10 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
         cur != null &&
         cur.value.isInitialized &&
         wStart != null &&
-        !start.isBefore(wStart) &&
-        start.isBefore(wStart.add(_windowDuration))) {
+        !seekTarget.isBefore(wStart) &&
+        seekTarget.isBefore(wStart
+            .add(cur.value.duration)
+            .subtract(const Duration(seconds: 1)))) {
       await cur.seekTo(seekTarget.difference(wStart));
       await cur.play();
       return;
@@ -358,6 +403,7 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
       _isLive = false;
       _detections = const [];
     });
+    _clearPastBoxes();
     _liveTick?.cancel();
     _liveTick = null;
     // Switching to a past window — tear down the live inference stream;
@@ -378,10 +424,23 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
         return;
       }
       await c.setLooping(false);
-      if (seekToSec != null) {
-        await c.seekTo(seekTarget.difference(start));
+      var offset = seekTarget.difference(start);
+      // Near live the mp4 can end a few seconds short of the request (the
+      // recorder flushes parts behind real time); seeking past the end would
+      // park the player on its last frame.
+      final dur = c.value.duration;
+      final latest = dur - const Duration(seconds: 2);
+      if (dur > Duration.zero && offset > latest) {
+        offset = latest.isNegative ? Duration.zero : latest;
       }
+      if (offset > Duration.zero) await c.seekTo(offset);
       await c.play();
+      _posAnchor = offset;
+      _posClock
+        ..reset()
+        ..start();
+      _lastPastTs = 0;
+      _autoLiveFired = false;
       c.addListener(_onPlayerUpdate);
 
       final old = _player;
@@ -527,11 +586,28 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
       });
       return;
     }
+    final pos = c.value.position;
+    if (pos != _posAnchor) {
+      _posAnchor = pos;
+      _posClock
+        ..reset()
+        ..start();
+    }
+    // A window near live ends where the recording did; carry on at live
+    // instead of freezing on the last frame.
+    final dur = c.value.duration;
+    if (!_autoLiveFired &&
+        !_playerLoading &&
+        dur > Duration.zero &&
+        pos >= dur - const Duration(milliseconds: 300) &&
+        wStart.add(dur).isAfter(DateTime.now().subtract(const Duration(seconds: 90)))) {
+      _autoLiveFired = true;
+      unawaited(_enterLive());
+      return;
+    }
     if (_userScrubbing) return;
-    final absolute = wStart.add(c.value.position);
-    // Past-mode overlay tracks the playhead: every position tick we look
-    // up the box sample closest to the absolute play time. This is cheap
-    // (binary search over a few hundred samples per window).
+    final absolute = wStart.add(pos);
+    // Paused frames and seeks; the ticker covers smooth motion while playing.
     _updatePastDetections();
     final sec = absolute.difference(_selectedDay).inMilliseconds / 1000.0;
     if (sec < 0 || sec > 86400) return;
@@ -633,6 +709,7 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
       _labelsOn = on;
       if (!on) _detections = const [];
     });
+    if (!on) _clearPastBoxes();
     if (on) {
       _refreshInference();
     } else {
@@ -686,26 +763,58 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
     );
     _inferencePast = c;
     _inferencePastSub = c.onUpdate.listen((_) {
-      // New samples arrived — refresh the overlay to whatever sample is
-      // closest to the player's current position.
+      // New samples arrived — refresh the overlay for the current position.
       _updatePastDetections();
     });
     c.start();
+    _pastTicker ??= createTicker((_) {
+      final p = _player;
+      if (p != null && p.value.isPlaying && !_userScrubbing) {
+        _updatePastDetections();
+      }
+    });
+    if (!_pastTicker!.isActive) _pastTicker!.start();
+  }
+
+  // Unix seconds currently on screen in past mode: last reported position
+  // plus wall-clock time since, capped so a stall can't run ahead far.
+  double? _estimatedPastTs() {
+    final c = _player;
+    final wStart = _windowStart;
+    if (c == null || wStart == null || !c.value.isInitialized) return null;
+    var pos = _posAnchor;
+    final v = c.value;
+    if (v.isPlaying && !v.isBuffering) {
+      var e = _posClock.elapsed * v.playbackSpeed;
+      if (e > const Duration(seconds: 1)) e = const Duration(seconds: 1);
+      pos += e;
+    }
+    var ts = (wStart.microsecondsSinceEpoch + pos.inMicroseconds) / 1e6;
+    // A fresh position report can land slightly behind the extrapolation;
+    // hold rather than jitter backward. Larger jumps are seeks.
+    if (ts < _lastPastTs && _lastPastTs - ts < 0.5) ts = _lastPastTs;
+    _lastPastTs = ts;
+    return ts;
   }
 
   void _updatePastDetections() {
-    final c = _player;
-    final wStart = _windowStart;
     final inf = _inferencePast;
-    if (!_labelsOn || _isLive || c == null || wStart == null || inf == null) {
-      return;
+    if (!_labelsOn || _isLive || inf == null) return;
+    final ts = _estimatedPastTs();
+    if (ts == null) return;
+    final boxes = inf.boxesAt(ts);
+    if (identical(boxes, _pastBoxes.value)) return;
+    if (boxes.isEmpty && _pastBoxes.value.isEmpty) return;
+    _pastBoxes.value = boxes;
+    final showing = boxes.isNotEmpty;
+    if (showing != _pastShowing && mounted) {
+      setState(() => _pastShowing = showing);
     }
-    final absUnix =
-        (wStart.add(c.value.position).millisecondsSinceEpoch) / 1000.0;
-    final boxes = inf.boxesNear(absUnix);
-    if (!_detectionsEqual(boxes, _detections)) {
-      setState(() => _detections = boxes);
-    }
+  }
+
+  void _clearPastBoxes() {
+    _pastBoxes.value = const [];
+    if (_pastShowing && mounted) setState(() => _pastShowing = false);
   }
 
   void _stopLiveInference() {
@@ -716,6 +825,8 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
   }
 
   void _stopPastInference() {
+    _pastTicker?.stop();
+    _clearPastBoxes();
     _inferencePastSub?.cancel();
     _inferencePastSub = null;
     _inferencePast?.dispose();
@@ -730,20 +841,18 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
     }
   }
 
-  // The past client returns the same List instance for repeated lookups
-  // in the same sample window, so reference equality is enough to avoid
-  // pointless setState churn. When both are empty we also skip the
-  // rebuild (an empty const list match would compare unequal by identity).
-  bool _detectionsEqual(List<Detection> a, List<Detection> b) {
-    if (identical(a, b)) return true;
-    return a.isEmpty && b.isEmpty;
-  }
-
   @override
   void dispose() {
     _liveTick?.cancel();
     _stallWatchdog?.cancel();
+    _listRefresh?.cancel();
+    _pastTicker?.dispose();
+    _pastTicker = null;
+    // Clear first so the teardown below has nothing to setState about.
+    _pastShowing = false;
+    _detections = const [];
     _stopAllInference();
+    _pastBoxes.dispose();
     _player?.removeListener(_onPlayerUpdate);
     _player?.dispose();
     _zoomController.dispose();
@@ -795,13 +904,13 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
           _sliderSec = sec;
           _ensureVisible(sec);
         });
-        _loadWindowAt(sec);
+        _loadWindowContaining(sec);
       },
       onChangeStart: (_) => _userScrubbing = true,
       onChanged: (v) => setState(() => _sliderSec = v),
       onChangeEnd: (v) {
         _userScrubbing = false;
-        _loadWindowAt(v);
+        _loadWindowContaining(v);
       },
     );
 
@@ -987,7 +1096,8 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
     final ar = c.value.aspectRatio == 0 ? 16 / 9 : c.value.aspectRatio;
     // Labels render in both live and past modes now — past mode uses the
     // playback re-inference SSE with ts→frame lookup.
-    final showOverlay = _labelsOn && _detections.isNotEmpty;
+    final showOverlay =
+        _labelsOn && (_isLive ? _detections.isNotEmpty : _pastShowing);
     // Keep the original AspectRatio → VideoPlayer tree when no overlay
     // would render. Wrapping in a Stack with StackFit.expand even when
     // empty appears to perturb the video_player texture sizing path on
@@ -1002,7 +1112,9 @@ class _PlaybackScreenState extends State<PlaybackScreen> {
         fit: StackFit.expand,
         children: [
           VideoPlayer(c),
-          BoxOverlay(detections: _detections),
+          _isLive
+              ? BoxOverlay(detections: _detections)
+              : BoxOverlay(listenable: _pastBoxes),
         ],
       ),
     ));
